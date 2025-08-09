@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package jito.bundle;
+
+service BundleService {
+  rpc SubmitBundle (SubmitBundleRequest) returns (SubmitBundleResponse) {}
+}
+
+message SubmitBundleRequest {
+  repeated string transactions = 1; // base64-encoded transactions
+}
+
+message SubmitBundleResponse {
+  string uuid = 1;
+}
+
+

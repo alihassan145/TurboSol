@@ -1,0 +1,26 @@
+{
+  "name": "turbosol",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon --watch src --exec node src/index.js",
+    "lint": "echo 'no linter configured'"
+  },
+  "author": "",
+  "license": "MIT",
+  "description": "Telegram Solana sniper bot (Jupiter + node-telegram-bot-api)",
+  "dependencies": {
+    "@solana/web3.js": "^1.95.4",
+    "axios": "^1.7.7",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.66.0",
+    "@grpc/grpc-js": "^1.11.1",
+    "@grpc/proto-loader": "^0.7.13"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  }
+}
