@@ -39,6 +39,7 @@ export function startLiquidityWatch(
             amountSol,
             priorityFeeLamports,
             useJitoBundle,
+            chatId,
           });
           onEvent?.(`Buy sent. Tx: ${txid}`);
         } catch (e) {

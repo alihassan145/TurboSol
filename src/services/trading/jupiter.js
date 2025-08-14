@@ -1,5 +1,5 @@
 import axios from "axios";
-import { getConnection, getWallet } from "../wallet.js";
+import { getConnection, getWallet, getUserWalletInstance, getUserConnectionInstance } from "../wallet.js";
 import { VersionedTransaction } from "@solana/web3.js";
 import { rotateRpc } from "../rpc.js";
 import { submitBundle, serializeToBase64 } from "../jito.js";
@@ -40,9 +40,23 @@ export async function performSwap({
   slippageBps,
   priorityFeeLamports,
   useJitoBundle = false,
+  chatId,
 }) {
-  const connection = getConnection();
-  const wallet = getWallet();
+  // Determine wallet/connection: use user-specific if chatId provided
+  let connection;
+  let wallet;
+  try {
+    if (chatId !== undefined && chatId !== null) {
+      connection = await getUserConnectionInstance(chatId);
+      wallet = await getUserWalletInstance(chatId);
+    }
+  } catch (e) {
+    // Fallback to global if user-specific not available
+  }
+  if (!connection || !wallet) {
+    connection = getConnection();
+    wallet = getWallet();
+  }
 
   const amount = toLamports(amountSol);
   const slippage =
