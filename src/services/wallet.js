@@ -32,7 +32,7 @@ export function getWallet() {
 
 // New user-specific functions
 export async function getUserPublicKey(chatId) {
-  if (!hasUserWallet(chatId)) {
+  if (!(await hasUserWallet(chatId))) {
     throw new Error("User wallet not found. Use /setup to create a wallet.");
   }
   const wallet = await getUserWallet(chatId);

@@ -12,13 +12,15 @@
   "license": "MIT",
   "description": "Telegram Solana sniper bot (Jupiter + node-telegram-bot-api)",
   "dependencies": {
+    "@grpc/grpc-js": "^1.11.1",
+    "@grpc/proto-loader": "^0.7.13",
     "@solana/web3.js": "^1.95.4",
     "axios": "^1.7.7",
     "bs58": "^6.0.0",
+    "crypto": "^1.0.1",
     "dotenv": "^16.4.5",
-    "node-telegram-bot-api": "^0.66.0",
-    "@grpc/grpc-js": "^1.11.1",
-    "@grpc/proto-loader": "^0.7.13"
+    "mongodb": "^6.18.0",
+    "node-telegram-bot-api": "^0.66.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"

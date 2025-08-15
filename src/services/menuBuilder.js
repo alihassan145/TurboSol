@@ -1,6 +1,7 @@
 import { getWalletInfo } from "./walletInfo.js";
 import { getRpcStatus } from "./rpcMonitor.js";
 import { getUserState } from "./userState.js";
+import { listUserWallets } from "./userWallets.js";
 
 export async function buildWalletStatusHeader(chatId) {
   const walletInfo = await getWalletInfo();
@@ -62,7 +63,7 @@ export function buildTradingToolsMenu() {
         ],
         [
           { text: "📊 Performance Stats", callback_data: "PERFORMANCE_STATS" },
-          { text: "⚙ Settings", callback_data: "SETTINGS" },
+          { text: "⚙ ", callback_data: "SETTINGS" },
         ],
         [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
       ],
@@ -110,6 +111,7 @@ export function buildSettingsMenu(chatId) {
           { text: "⚡ Jito Settings", callback_data: "JITO_SETTINGS" },
         ],
         [{ text: "🎯 Slippage Settings", callback_data: "SLIPPAGE_CONFIG" }],
+        [{ text: "🎯 Snipe Defaults", callback_data: "SNIPE_DEFAULTS" }],
         [{ text: "🔙 Back to Trading Tools", callback_data: "TRADING_TOOLS" }],
       ],
     },
@@ -188,23 +190,118 @@ export function buildTurboSolSettingsMenu(chatId) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: `🎰 Degen Mode ${state.degenMode ? 'ON' : 'OFF'}`, callback_data: 'TOGGLE_DEGEN' },
-          { text: `🛡 Buy Protection ${state.buyProtection ? 'ON' : 'OFF'}`, callback_data: 'TOGGLE_BUY_PROTECTION' }
+          {
+            text: `🎰 Degen Mode ${state.degenMode ? "ON" : "OFF"}`,
+            callback_data: "TOGGLE_DEGEN",
+          },
+          {
+            text: `🛡 Buy Protection ${state.buyProtection ? "ON" : "OFF"}`,
+            callback_data: "TOGGLE_BUY_PROTECTION",
+          },
         ],
         [
-          { text: `🧠 Expert Mode ${state.expertMode ? 'ON' : 'OFF'}`, callback_data: 'TOGGLE_EXPERT' },
-          { text: `🕶 Private PNL ${state.privatePnl ? 'ON' : 'OFF'}`, callback_data: 'TOGGLE_PNL' }
+          {
+            text: `🧠 Expert Mode ${state.expertMode ? "ON" : "OFF"}`,
+            callback_data: "TOGGLE_EXPERT",
+          },
+          {
+            text: `🕶 Private PNL ${state.privatePnl ? "ON" : "OFF"}`,
+            callback_data: "TOGGLE_PNL",
+          },
         ],
         [
-          { text: '⚙ Fee Settings', callback_data: 'FEE_SETTINGS' },
-          { text: '🌐 RPC Settings', callback_data: 'RPC_SETTINGS' }
+          { text: "💼 Wallets", callback_data: "WALLETS_MENU" },
+          { text: "⚙ Fee Settings", callback_data: "FEE_SETTINGS" },
         ],
         [
-          { text: '🔙 Back', callback_data: 'MAIN_MENU' },
-          { text: '❌ Close', callback_data: 'CLOSE_MENU' }
-        ]
-      ]
-    }
+          { text: "🌐 RPC Settings", callback_data: "RPC_SETTINGS" },
+        ],
+        [
+          { text: "🎯 Snipe Defaults", callback_data: "SNIPE_DEFAULTS" },
+        ],
+        [
+          { text: "🔙 Back", callback_data: "MAIN_MENU" },
+          { text: "❌ Close", callback_data: "CLOSE_MENU" },
+        ],
+      ],
+    },
+  };
+}
+
+// New: Wallets management menu
+export async function buildWalletsMenu(chatId) {
+  const wallets = await listUserWallets(chatId);
+  
+  const keyboard = [
+    [
+      { text: "➕ Create Wallet", callback_data: "CREATE_WALLET" },
+      { text: "📥 Import Wallet", callback_data: "IMPORT_WALLET" },
+    ],
+  ];
+
+  // Add existing wallets
+  for (const wallet of wallets.slice(0, 8)) { // Limit to 8 wallets for UI
+    const activeIndicator = wallet.active ? "✅ " : "";
+    const shortAddress = wallet.publicKey.slice(0, 6) + "..." + wallet.publicKey.slice(-4);
+    keyboard.push([
+      {
+        text: `${activeIndicator}${wallet.name} (${shortAddress})`,
+        callback_data: `WALLET_DETAILS_${wallet.id}`,
+      },
+    ]);
+  }
+
+  keyboard.push([
+    { text: "🔙 Back to Settings", callback_data: "SETTINGS" },
+  ]);
+
+  return {
+    reply_markup: {
+      inline_keyboard: keyboard,
+    },
+  };
+}
+
+// New: Individual wallet details menu
+export async function buildWalletDetailsMenu(chatId, walletId) {
+  const wallets = await listUserWallets(chatId);
+  const wallet = wallets.find(w => w.id === walletId);
+  
+  if (!wallet) {
+    return {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🔙 Back to Wallets", callback_data: "WALLETS_MENU" }],
+        ],
+      },
+    };
+  }
+
+  const keyboard = [];
+  
+  if (!wallet.active) {
+    keyboard.push([
+      { text: "✅ Set as Active", callback_data: `SET_ACTIVE_${walletId}` },
+    ]);
+  }
+  
+  keyboard.push([
+    { text: "✏️ Rename", callback_data: `RENAME_WALLET_${walletId}` },
+    { text: "📋 Copy Address", callback_data: `COPY_ADDRESS_${walletId}` },
+  ]);
+
+  keyboard.push([
+    { text: "🗑 Delete", callback_data: `DELETE_WALLET_${walletId}` },
+  ]);
+
+  keyboard.push([
+    { text: "🔙 Back to Wallets", callback_data: "WALLETS_MENU" },
+  ]);
+
+  return {
+    reply_markup: {
+      inline_keyboard: keyboard,
+    },
   };
 }
 
@@ -221,6 +318,38 @@ export function buildSupportMenu() {
           { text: "🆘 Help", callback_data: "HELP" },
         ],
         [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
+      ],
+    },
+  };
+}
+
+// New: Build Snipe Defaults menu
+export function buildSnipeDefaultsMenu(chatId) {
+  const state = getUserState(chatId);
+  const autoPasteText = state.autoSnipeOnPaste ? "Auto-Snipe on Paste: ON" : "Auto-Snipe on Paste: OFF";
+  const jitoText = state.enableJitoForSnipes ? "Jito for Snipes: ON" : "Jito for Snipes: OFF";
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: `Default Buy: ${state.defaultBuySol} SOL`, callback_data: "SET_DEFAULT_BUY" },
+          { text: `Default Snipe: ${state.defaultSnipeSol} SOL`, callback_data: "SET_DEFAULT_SNIPE" },
+        ],
+        [
+          { text: `Snipe Slippage: ${state.snipeSlippage} bps`, callback_data: "SET_SNIPE_SLIPPAGE" },
+          { text: `Max Priority Fee: ${state.maxSnipeGasPrice || "auto"}`, callback_data: "SET_SNIPE_FEE" },
+        ],
+        [
+          { text: autoPasteText, callback_data: "TOGGLE_AUTO_SNIPE_PASTE" },
+          { text: jitoText, callback_data: "TOGGLE_SNIPE_JITO" },
+        ],
+        [
+          { text: `Poll Interval: ${state.snipePollInterval}ms`, callback_data: "SET_SNIPE_INTERVAL" },
+          { text: `Retry Count: ${state.snipeRetryCount}`, callback_data: "SET_SNIPE_RETRY" },
+        ],
+        [
+          { text: "🔙 Back to Settings", callback_data: "SETTINGS" },
+        ],
       ],
     },
   };

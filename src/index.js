@@ -3,8 +3,10 @@ dotenv.config();
 
 import { startTelegramBot } from "./services/telegram.js";
 import { initializeWallet } from "./services/wallet.js";
+import { connectWalletsDb } from "./services/userWallets.js";
 
 async function main() {
+  await connectWalletsDb();
   await initializeWallet();
   await startTelegramBot();
 }

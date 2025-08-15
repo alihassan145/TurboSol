@@ -18,7 +18,19 @@ export function getUserState(chatId) {
       positions: [],
       limitOrders: [],
       watchedWallets: [],
-      menuHistory: ['main']
+      menuHistory: ['main'],
+      // Defaults for quick actions
+      defaultBuySol: 0.05,
+      defaultSnipeSol: 0.05,
+      // Snipe-specific configuration
+      autoSnipeOnPaste: false, // Auto-start snipe without confirmation on address paste
+      snipeSlippage: 100, // Custom slippage for snipe operations (in BPS)
+      maxSnipeGasPrice: 200000, // Max priority fee for snipe operations (lamports)
+      snipePollInterval: 2000, // Polling interval for liquidity checks (ms)
+      enableJitoForSnipes: true, // Use Jito bundling for snipes by default
+      snipeRetryCount: 3, // Number of retry attempts on failed snipe
+      // For text input flows
+      pendingInput: null // e.g., { type: 'IMPORT_WALLET', data: {...} }
     });
   }
   return userStates.get(chatId);
@@ -78,4 +90,9 @@ export function addWatchedWallet(chatId, walletAddress, label = '') {
     timestamp: Date.now(),
     id: Date.now().toString()
   });
+}
+
+export function setPendingInput(chatId, pending) {
+  const state = getUserState(chatId);
+  state.pendingInput = pending; // or null to clear
 }
