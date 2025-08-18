@@ -173,8 +173,9 @@ export async function startTelegramBot() {
 
       // Handle auto-detected token actions
       if (data.startsWith("AUTO_QUOTE_")) {
-        const [, mint, amt] = data.split("_");
-        const amountSol = parseFloat(amt);
+        const rest = data.slice("AUTO_QUOTE_".length);
+        const [mint, amtStr] = rest.split("_");
+        const amountSol = parseFloat(amtStr);
         const res = await getTokenQuote({
           inputMint: "So11111111111111111111111111111111111111112",
           outputMint: mint,
@@ -190,8 +191,9 @@ export async function startTelegramBot() {
       }
 
       if (data.startsWith("AUTO_BUY_")) {
-        const [, mint, amt] = data.split("_");
-        const amountSol = parseFloat(amt);
+        const rest = data.slice("AUTO_BUY_".length);
+        const [mint, amtStr] = rest.split("_");
+        const amountSol = parseFloat(amtStr);
         if (!(await hasUserWallet(chatId))) {
           await bot.answerCallbackQuery(query.id, { text: "No wallet linked" });
           await bot.sendMessage(chatId, `No wallet linked. Use /setup to create or /import <privateKeyBase58>.`);
@@ -208,8 +210,9 @@ export async function startTelegramBot() {
       }
 
       if (data.startsWith("AUTO_SNIPE_")) {
-        const [, mint, amt] = data.split("_");
-        const amountSol = parseFloat(amt);
+        const rest = data.slice("AUTO_SNIPE_".length);
+        const [mint, amtStr] = rest.split("_");
+        const amountSol = parseFloat(amtStr);
         if (!(await hasUserWallet(chatId))) {
           await bot.answerCallbackQuery(query.id, { text: "No wallet linked" });
           await bot.sendMessage(chatId, `No wallet linked. Use /setup to create or /import <privateKeyBase58>.`);
@@ -315,12 +318,34 @@ export async function startTelegramBot() {
         const state = getUserState(chatId);
         const hasPositions = (state.positions || []).length > 0;
         const body = hasPositions
-          ? "Your open positions will appear here."
+          ? "You have open positions. Tap 'View All Positions' to see details."
           : "No open positions yet!\nStart your trading journey by pasting a contract address in chat.";
         await bot.editMessageText(`🚀 TurboSol Positions\n\n${body}` , {
           chat_id: chatId,
           message_id: messageId,
           reply_markup: buildPositionsMenu(chatId).reply_markup
+        });
+        return;
+      }
+
+      if (data === "VIEW_ALL_POSITIONS") {
+        const state = getUserState(chatId);
+        const list = (state.positions || []);
+        if (!list.length) {
+          await bot.answerCallbackQuery(query.id, { text: "No positions" });
+          return;
+        }
+        const lines = list.map((p, i) => {
+          const t = new Date(p.timestamp).toLocaleString();
+          const mintShort = shortenAddress ? shortenAddress(p.mint) : p.mint;
+          const tokOut = (typeof p.tokensOut === 'number') ? Number(p.tokensOut).toFixed(4) : "?";
+          const txShort = p.txid ? (p.txid.slice(0, 8) + "…" + p.txid.slice(-8)) : "";
+          return `${i + 1}. ${p.symbol || "TOKEN"} (${mintShort}) — ${p.solIn} SOL -> ~${tokOut}  [${t}] ${txShort}`;
+        }).join("\n");
+        await bot.editMessageText(`📈 Open Positions\n\n${lines}`, {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: { inline_keyboard: [[{ text: "🔙 Back", callback_data: "POSITIONS" }], [{ text: "🏠 Main", callback_data: "MAIN_MENU" }]] }
         });
         return;
       }
@@ -518,6 +543,7 @@ export async function startTelegramBot() {
           inputMint: "So11111111111111111111111111111111111111112",
           outputMint: mint,
           amountSol,
+          chatId,
         });
         if (result?.txid) {
           return bot.sendMessage(

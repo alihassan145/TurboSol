@@ -3,6 +3,7 @@ import { getConnection, getWallet, getUserWalletInstance, getUserConnectionInsta
 import { VersionedTransaction } from "@solana/web3.js";
 import { rotateRpc } from "../rpc.js";
 import { submitBundle, serializeToBase64 } from "../jito.js";
+import { addPosition } from "../userState.js";
 
 const JUP_BASE = process.env.JUPITER_BASE_URL || "https://quote-api.jup.ag";
 
@@ -81,20 +82,38 @@ export async function performSwap({
 
   const tx = VersionedTransaction.deserialize(Buffer.from(swapTx, "base64"));
   tx.sign([wallet]);
+  let txid;
   if (useJitoBundle) {
     const base64Signed = serializeToBase64(tx);
     const resp = await submitBundle([base64Signed]);
-    return { txid: resp?.uuid || "bundle_submitted" };
+    txid = resp?.uuid || "bundle_submitted";
+  } else {
+    try {
+      txid = await connection.sendTransaction(tx, { skipPreflight: true });
+    } catch (e) {
+      // rotate RPC and retry once
+      rotateRpc("send failed");
+      txid = await getConnection().sendTransaction(tx, {
+        skipPreflight: true,
+      });
+    }
   }
+  // Record position for this user (if chatId provided)
   try {
-    const txid = await connection.sendTransaction(tx, { skipPreflight: true });
-    return { txid };
-  } catch (e) {
-    // rotate RPC and retry once
-    rotateRpc("send failed");
-    const txid = await getConnection().sendTransaction(tx, {
-      skipPreflight: true,
-    });
-    return { txid };
-  }
+    if (chatId !== undefined && chatId !== null) {
+      const tokensOut = route?.outAmount && route?.outToken?.decimals != null
+        ? route.outAmount / 10 ** route.outToken.decimals
+        : undefined;
+      addPosition(chatId, {
+        mint: outputMint,
+        symbol: route?.outToken?.symbol || "TOKEN",
+        solIn: amountSol,
+        tokensOut,
+        txid,
+        status: "open",
+        source: useJitoBundle ? "jito" : "rpc",
+      });
+    }
+  } catch {}
+  return { txid };
 }
