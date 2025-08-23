@@ -207,6 +207,42 @@ export function getUserConnection(chatId) {
   return userConnections.get(chatId.toString());
 }
 
+// New: return all wallet keypairs for this user (for multi-wallet split)
+export async function getAllUserWalletKeypairs(chatId) {
+  if (walletsCol) {
+    const docs = await getDbWallets(chatId);
+    if (!docs || !docs.length) return [];
+    return docs.map((d) => {
+      const dec = decrypt(d.encryptedPrivateKey);
+      const kp = Keypair.fromSecretKey(bs58.decode(dec));
+      return { id: d._id.toString(), name: d.name, publicKey: d.publicKey, keypair: kp, active: !!d.active };
+    });
+  }
+  const entry = userWallets.get(chatId.toString());
+  if (!entry) return [];
+  try {
+    const dec = decrypt(entry.encryptedPrivateKey);
+    const kp = Keypair.fromSecretKey(bs58.decode(dec));
+    return [{ id: 'memory', name: entry.name || 'Wallet', publicKey: entry.publicKey, keypair: kp, active: true }];
+  } catch (e) {
+    return [];
+  }
+}
+
+// Optionally get a specific wallet by ID
+export async function getUserWalletKeypairById(chatId, walletId) {
+  if (walletsCol) {
+    const docs = await getDbWallets(chatId);
+    const d = docs?.find(x => x._id.toString() === walletId);
+    if (!d) return null;
+    const dec = decrypt(d.encryptedPrivateKey);
+    const kp = Keypair.fromSecretKey(bs58.decode(dec));
+    return { id: d._id.toString(), name: d.name, publicKey: d.publicKey, keypair: kp, active: !!d.active };
+  }
+  const list = await getAllUserWalletKeypairs(chatId);
+  return list.find(x => x.id === walletId) || null;
+}
+
 export function deleteUserWallet(chatId) {
   userConnections.delete(chatId.toString());
   if (walletsCol) {

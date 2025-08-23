@@ -1,4 +1,5 @@
 import { getRpcConnection } from "./rpc.js";
+import { Connection } from "@solana/web3.js";
 
 let latencyCache = { value: 0, timestamp: 0 };
 const CACHE_DURATION = 10000; // 10 seconds
@@ -41,4 +42,22 @@ export async function getRpcStatus() {
     status,
     display: `${status} (${latencyText})`
   };
+}
+
+// New: measure latency for a list of RPC HTTP endpoints and return sorted results
+export async function measureEndpointsLatency(urls = []) {
+  const checks = urls.map(async (url) => {
+    const started = Date.now();
+    try {
+      const conn = new Connection(url, "confirmed");
+      await conn.getSlot();
+      return { url, latency: Date.now() - started };
+    } catch (e) {
+      // Put failing endpoints at the end
+      return { url, latency: Number.MAX_SAFE_INTEGER };
+    }
+  });
+  const results = await Promise.all(checks);
+  results.sort((a, b) => a.latency - b.latency);
+  return results;
 }

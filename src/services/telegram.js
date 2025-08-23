@@ -10,6 +10,7 @@ import {
   addRpcEndpoint,
   rotateRpc,
   setGrpcEndpoint,
+  getAllRpcEndpoints,
 } from "./rpc.js";
 import {
   setPriorityFeeLamports,
@@ -19,9 +20,15 @@ import {
 } from "./config.js";
 import { hasUserWallet, createUserWallet, importUserWallet, getUserPublicKey as getUserPk, listUserWallets, setActiveWallet, renameUserWallet } from "./userWallets.js";
 import { getWalletInfo, shortenAddress } from "./walletInfo.js";
-import { buildTurboSolMainMenu, buildTurboSolSettingsMenu, buildPositionsMenu, buildWalletsMenu, buildWalletDetailsMenu, buildSnipeDefaultsMenu } from "./menuBuilder.js";
+import { buildTurboSolMainMenu, buildTurboSolSettingsMenu, buildPositionsMenu, buildWalletsMenu, buildWalletDetailsMenu, buildSnipeDefaultsMenu, buildTradingToolsMenu } from "./menuBuilder.js";
 import { getUserState, updateUserSetting, setPendingInput } from "./userState.js";
 import { PublicKey } from "@solana/web3.js";
+import { riskCheckToken } from "./risk.js";
+import { startStopLoss, stopStopLoss } from "./watchers/stopLossWatcher.js";
+import { startPumpFunListener, stopPumpFunListener } from "./watchers/pumpfunWatcher.js";
+import { addDevWalletToMonitor, startDevWalletMonitor, stopDevWalletMonitor } from "./watchers/devWalletMonitor.js";
+import { startMempoolWatch, stopMempoolWatch } from "./watchers/mempoolWatcher.js";
+import { measureEndpointsLatency } from "./rpcMonitor.js";
 
 function parseFlags(parts) {
   const flags = {};
@@ -30,6 +37,9 @@ function parseFlags(parts) {
     if (!v) continue;
     if (k === "fee") flags.priorityFeeLamports = Number(v);
     if (k === "jito") flags.useJitoBundle = v === "1" || v === "true";
+    if (k === "relay") flags.usePrivateRelay = v === "1" || v === "true";
+    if (k === "split") flags.splitAcrossWallets = v === "1" || v === "true";
+    if (k === "wallets") flags.walletsCount = Math.max(1, Number(v));
   }
   return flags;
 }
@@ -43,7 +53,7 @@ function buildMainMenu(chatId) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: "Wallet", callback_data: "WALLET" },
+          { text: "Wallet", callback_data: "WALLETS_MENU" },
           { text: "Quick Buy", callback_data: "QUICK_BUY" },
         ],
         [
@@ -97,13 +107,13 @@ export async function startTelegramBot() {
     console.error('Failed to set bot commands:', e);
   }
 
-  bot.onText(/\/start/, async (msg) => {
+  bot.onText(/\/[sS]tart/, async (msg) => {
     const chatId = msg.chat.id;
     try {
       const welcomeMessage = await buildTurboSolWelcomeMessage(chatId);
       await bot.sendMessage(chatId, welcomeMessage);
       await bot.sendMessage(chatId, "Choose an option:", {
-        reply_markup: buildTurboSolMainMenu(),
+        reply_markup: buildMainMenu(chatId).reply_markup,
       });
     } catch (e) {
       await bot.sendMessage(chatId, `🚀 Welcome to TurboSol!\n\nUse /setup to create a wallet or /import <privateKeyBase58>.`);
@@ -171,6 +181,20 @@ export async function startTelegramBot() {
         return;
       }
 
+      if (data === "QUICK_BUY") {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Quick Buy" });
+          if (!(await hasUserWallet(chatId))) {
+            await bot.sendMessage(chatId, "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet.");
+            return;
+          }
+          await bot.sendMessage(chatId, "💰 Quick Buy\n\nSend a token address (mint) to buy with default settings, or use:\n\n`<token_address> <amount_sol>`\n\nExample:\n`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v 0.1`");
+        } catch (e) {
+          await bot.sendMessage(chatId, `Quick Buy failed: ${e?.message || e}`);
+        }
+        return;
+      }
+
       // Handle auto-detected token actions
       if (data.startsWith("AUTO_QUOTE_")) {
         const rest = data.slice("AUTO_QUOTE_".length);
@@ -199,6 +223,17 @@ export async function startTelegramBot() {
           await bot.sendMessage(chatId, `No wallet linked. Use /setup to create or /import <privateKeyBase58>.`);
           return;
         }
+        // Optional risk check gate
+        try {
+          const requireLpLock = String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() === "true" || process.env.REQUIRE_LP_LOCK === "1";
+          const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
+          const risk = await riskCheckToken(mint, { requireLpLock, maxBuyTaxBps });
+          if (!risk.ok) {
+            await bot.answerCallbackQuery(query.id, { text: "Blocked by risk checks" });
+            await bot.sendMessage(chatId, `🚫 Trade blocked: ${risk.reasons?.join("; ")}`);
+            return;
+          }
+        } catch {}
         const { txid } = await performSwap({
           inputMint: "So11111111111111111111111111111111111111112",
           outputMint: mint,
@@ -244,6 +279,24 @@ export async function startTelegramBot() {
         return;
       }
 
+      if (data === "TRADING_TOOLS") {
+        await bot.editMessageText("🛠 Trading Tools", {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildTradingToolsMenu().reply_markup,
+        });
+        return;
+      }
+
+      if (data === "MAIN_MENU") {
+        await bot.editMessageText("🏠 Main Menu", {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildTurboSolMainMenu(),
+        });
+        return;
+      }
+
       if (data === "SNIPE_DEFAULTS") {
         await bot.editMessageText("🎯 Snipe Defaults", {
           chat_id: chatId,
@@ -254,18 +307,41 @@ export async function startTelegramBot() {
       }
 
       if (data === "WALLETS_MENU") {
-        const menu = await buildWalletsMenu(chatId);
-        await bot.editMessageText("💼 Wallets — manage your wallets", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: menu.reply_markup
-        });
+        console.log(`[DEBUG] WALLETS_MENU callback received for chatId: ${chatId}`);
+        try { await bot.answerCallbackQuery(query.id, { text: "Opening Wallets..." }); } catch {}
+        try {
+          console.log(`[DEBUG] Building wallets menu for chatId: ${chatId}`);
+          const menu = await buildWalletsMenu(chatId);
+          console.log(`[DEBUG] Menu built successfully:`, JSON.stringify(menu, null, 2));
+          await bot.editMessageText("💼 Wallets — manage your wallets", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: menu.reply_markup
+          });
+          console.log(`[DEBUG] Message edited successfully`);
+        } catch (e) {
+          console.log(`[DEBUG] Edit failed, trying sendMessage. Error:`, e.message);
+          try {
+            const menu = await buildWalletsMenu(chatId);
+            await bot.sendMessage(chatId, "💼 Wallets — manage your wallets", { reply_markup: menu.reply_markup });
+            console.log(`[DEBUG] New message sent successfully`);
+          } catch (fallbackError) {
+            console.log(`[DEBUG] Fallback also failed:`, fallbackError.message);
+            await bot.sendMessage(chatId, `Failed to open Wallets: ${(e?.message || e).toString().slice(0, 200)}`);
+          }
+        }
         return;
       }
 
       if (data === "CREATE_WALLET") {
-        const res = await createUserWallet(chatId);
-        await bot.answerCallbackQuery(query.id, { text: "Wallet created" });
+        try {
+          const res = await createUserWallet(chatId);
+          await bot.answerCallbackQuery(query.id, { text: "Wallet created" });
+        } catch (e) {
+          const msg = e?.message || String(e);
+          await bot.answerCallbackQuery(query.id, { text: msg.slice(0, 200) });
+          await bot.sendMessage(chatId, `Create wallet failed: ${msg}`);
+        }
         const menu = await buildWalletsMenu(chatId);
         await bot.editMessageReplyMarkup(menu.reply_markup, { chat_id: chatId, message_id: messageId });
         return;
@@ -273,28 +349,45 @@ export async function startTelegramBot() {
 
       if (data === "IMPORT_WALLET") {
         setPendingInput(chatId, { type: "IMPORT_WALLET" });
+        try { await bot.answerCallbackQuery(query.id, { text: "Awaiting private key…" }); } catch {}
         await bot.sendMessage(chatId, "Send your private key in Base58 to import your wallet.\nWarning: Only share with trusted bots. You can revoke access anytime.");
         return;
       }
 
       if (data.startsWith("WALLET_DETAILS_")) {
+        try { await bot.answerCallbackQuery(query.id, { text: "Wallet details" }); } catch {}
         const walletId = data.replace("WALLET_DETAILS_", "");
-        const details = await buildWalletDetailsMenu(chatId, walletId);
-        await bot.editMessageText("💼 Wallet Details", { chat_id: chatId, message_id: messageId, reply_markup: details.reply_markup });
+        try {
+          const details = await buildWalletDetailsMenu(chatId, walletId);
+          await bot.editMessageText("💼 Wallet Details", { chat_id: chatId, message_id: messageId, reply_markup: details.reply_markup });
+        } catch (e) {
+          try {
+            const details = await buildWalletDetailsMenu(chatId, walletId);
+            await bot.sendMessage(chatId, "💼 Wallet Details", { reply_markup: details.reply_markup });
+          } catch (_) {
+            await bot.sendMessage(chatId, `Failed to open wallet details: ${(e?.message || e).toString().slice(0, 200)}`);
+          }
+        }
         return;
       }
 
       if (data.startsWith("SET_ACTIVE_")) {
         const walletId = data.replace("SET_ACTIVE_", "");
-        await setActiveWallet(chatId, walletId);
-        const details = await buildWalletDetailsMenu(chatId, walletId);
-        await bot.editMessageReplyMarkup(details.reply_markup, { chat_id: chatId, message_id: messageId });
+        try {
+          await setActiveWallet(chatId, walletId);
+          try { await bot.answerCallbackQuery(query.id, { text: "Active wallet set" }); } catch {}
+          const details = await buildWalletDetailsMenu(chatId, walletId);
+          await bot.editMessageReplyMarkup(details.reply_markup, { chat_id: chatId, message_id: messageId });
+        } catch (e) {
+          await bot.sendMessage(chatId, `Failed to set active wallet: ${e?.message || e}`);
+        }
         return;
       }
 
       if (data.startsWith("RENAME_WALLET_")) {
         const walletId = data.replace("RENAME_WALLET_", "");
         setPendingInput(chatId, { type: "RENAME_WALLET", walletId });
+        try { await bot.answerCallbackQuery(query.id, { text: "Send a new name…" }); } catch {}
         await bot.sendMessage(chatId, "Enter a new name for this wallet:");
         return;
       }
@@ -303,7 +396,10 @@ export async function startTelegramBot() {
         const walletId = data.replace("COPY_ADDRESS_", "");
         const wallets = await listUserWallets(chatId);
         const w = wallets.find(x => x.id === walletId);
-        if (w) await bot.sendMessage(chatId, `Address: ${w.publicKey}`);
+        if (w) {
+          try { await bot.answerCallbackQuery(query.id, { text: "Address sent" }); } catch {}
+          await bot.sendMessage(chatId, `Address: ${w.publicKey}`);
+        }
         return;
       }
 
@@ -350,13 +446,75 @@ export async function startTelegramBot() {
         return;
       }
 
+      // Performance stats view
+      if (data === "PERFORMANCE_STATS") {
+        const state = getUserState(chatId);
+        const trades = (state.trades || []);
+        if (!trades.length) {
+          await bot.answerCallbackQuery(query.id, { text: "No trades yet" });
+          await bot.sendMessage(chatId, "No trades logged yet. Start trading to build performance history.");
+          return;
+        }
+        let buySol = 0, sellSol = 0;
+        const byMint = new Map();
+        for (const t of trades) {
+          if (t.kind === 'buy') {
+            const s = Number(t.sol || 0);
+            buySol += s;
+            const m = byMint.get(t.mint) || { buy: 0, sell: 0 };
+            m.buy += s;
+            byMint.set(t.mint, m);
+          } else if (t.kind === 'sell') {
+            const sOut = Number(t.solOut || t.sol || 0);
+            sellSol += sOut;
+            const m = byMint.get(t.mint) || { buy: 0, sell: 0 };
+            m.sell += sOut;
+            byMint.set(t.mint, m);
+          }
+        }
+        const pnl = sellSol - buySol;
+        let wins = 0, losses = 0;
+        for (const [, v] of byMint) {
+          if (v.sell > 0) {
+            if (v.sell > v.buy) wins++; else losses++;
+          }
+        }
+        const total = wins + losses;
+        const winRate = total ? Math.round((wins / total) * 100) : 0;
+        const sign = pnl >= 0 ? "🟢" : "🔴";
+        const msg = [
+          `📊 Performance Stats — All Time`,
+          `Trades: ${trades.length}`,
+          `Buys: ${buySol.toFixed(4)} SOL`,
+          `Sells: ${sellSol.toFixed(4)} SOL`,
+          `${sign} P&L: ${pnl.toFixed(4)} SOL`,
+          `Win-rate: ${winRate}% (${wins}/${total})`
+        ].join("\n");
+        await bot.sendMessage(chatId, msg);
+        await bot.answerCallbackQuery(query.id, { text: "Stats sent" });
+        return;
+      }
+
       // Toggle handlers for settings
-      if (["TOGGLE_DEGEN", "TOGGLE_BUY_PROTECTION", "TOGGLE_EXPERT", "TOGGLE_PNL"].includes(data)) {
+      if (["TOGGLE_DEGEN", "TOGGLE_BUY_PROTECTION", "TOGGLE_EXPERT", "TOGGLE_PNL", "TOGGLE_RELAY", "TOGGLE_TIER"].includes(data)) {
+        if (data === 'TOGGLE_TIER') {
+          const order = ['basic','plus','pro'];
+          const cur = (getUserState(chatId).tier || 'basic').toLowerCase();
+          const idx = order.indexOf(cur);
+          const next = order[(idx + 1) % order.length];
+          updateUserSetting(chatId, 'tier', next);
+          await bot.editMessageReplyMarkup(buildTurboSolSettingsMenu(chatId).reply_markup, {
+            chat_id: chatId,
+            message_id: messageId
+          });
+          return;
+        }
         const keyMap = {
           TOGGLE_DEGEN: 'degenMode',
           TOGGLE_BUY_PROTECTION: 'buyProtection',
           TOGGLE_EXPERT: 'expertMode',
-          TOGGLE_PNL: 'privatePnl'
+          TOGGLE_PNL: 'privatePnl',
+          TOGGLE_RELAY: 'enablePrivateRelay'
         };
         const key = keyMap[data];
         const current = getUserState(chatId)[key];
@@ -496,6 +654,80 @@ export async function startTelegramBot() {
           .join("\n");
         return bot.sendMessage(chatId, `Rotated. RPCs:\n${list}`);
       }
+      if (text === "rpc bench") {
+        try {
+          const urls = getAllRpcEndpoints();
+          if (!urls.length) return bot.sendMessage(chatId, "No RPC endpoints configured");
+          const ranked = await measureEndpointsLatency(urls);
+          const lines = ranked.map((r, i) => `${i + 1}. ${r.url} — ${r.latency === Number.MAX_SAFE_INTEGER ? "fail" : r.latency + "ms"}`);
+          return bot.sendMessage(chatId, `RPC Benchmark (fastest first):\n${lines.join("\n")}`);
+        } catch (e) {
+          return bot.sendMessage(chatId, `Benchmark error: ${e.message || e}`);
+        }
+      }
+      if (text === "trades") {
+        const state = getUserState(chatId);
+        const trades = (state.trades || []).slice(-10).reverse();
+        if (!trades.length) return bot.sendMessage(chatId, "No trades logged yet.");
+        const fmt = (t) => {
+          const ts = new Date(t.timestamp).toLocaleTimeString();
+          const shortMint = t.mint ? (t.mint.slice(0, 6) + "…" + t.mint.slice(-4)) : "?";
+          if (t.kind === "buy") return `${ts} BUY ${shortMint} — ${t.sol} SOL  [${t.latencyMs || "?"}ms${t.slot ? ", slot " + t.slot : ""}]`;
+          if (t.kind === "sell") return `${ts} SELL ${shortMint} — amtRaw=${t.amountRaw}  [${t.latencyMs || "?"}ms${t.slot ? ", slot " + t.slot : ""}]`;
+          return `${ts} ${t.kind || "trade"} ${shortMint}`;
+        };
+        return bot.sendMessage(chatId, `Last trades:\n${trades.map(fmt).join("\n")}`);
+      }
+
+      // Tier management commands
+      if (text === "tier") {
+        const s = getUserState(chatId);
+        const tier = (s.tier || 'basic').toLowerCase();
+        const caps = s.tierCaps || {};
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const spent = Number(s.dailySpend?.[todayKey] || 0);
+        const capVal = (caps[tier] != null) ? Number(caps[tier]) : Infinity;
+        const remaining = capVal === Infinity ? '∞' : Math.max(0, capVal - spent).toFixed(6);
+        const capsLine = `basic=${caps.basic ?? '-'} SOL, plus=${caps.plus ?? '-'} SOL, pro=${caps.pro ?? '-'} SOL`;
+        return bot.sendMessage(chatId, `Current tier: ${tier.toUpperCase()}\nCaps: ${capsLine}\nToday spent: ${spent.toFixed(6)} SOL\nRemaining: ${remaining} SOL`);
+      }
+      if (text.startsWith("tier set ")) {
+        const target = text.split(/\s+/)[2]?.toLowerCase();
+        if (!['basic','plus','pro'].includes(target)) {
+          return bot.sendMessage(chatId, "Usage: tier set <basic|plus|pro>");
+        }
+        updateUserSetting(chatId, 'tier', target);
+        return bot.sendMessage(chatId, `Tier set to ${target.toUpperCase()}`);
+      }
+      if (text.startsWith("tier caps")) {
+        const parts = text.split(/\s+/);
+        const s = getUserState(chatId);
+        const caps = { ...(s.tierCaps || {}) };
+        if (parts.length >= 4) {
+          const t = parts[2]?.toLowerCase();
+          const val = Number(parts[3]);
+          if (!['basic','plus','pro'].includes(t) || !Number.isFinite(val) || val < 0) {
+            return bot.sendMessage(chatId, "Usage: tier caps <basic|plus|pro> <SOL cap>");
+          }
+          caps[t] = val;
+          updateUserSetting(chatId, 'tierCaps', caps);
+          return bot.sendMessage(chatId, `Updated ${t.toUpperCase()} cap to ${val} SOL`);
+        } else {
+          const capsLine = `basic=${caps.basic ?? '-'} SOL, plus=${caps.plus ?? '-'} SOL, pro=${caps.pro ?? '-'} SOL`;
+          return bot.sendMessage(chatId, `Current caps: ${capsLine}`);
+        }
+      }
+      if (text === "daily spend") {
+        const s = getUserState(chatId);
+        const tier = (s.tier || 'basic').toLowerCase();
+        const caps = s.tierCaps || {};
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const spent = Number(s.dailySpend?.[todayKey] || 0);
+        const capVal = (caps[tier] != null) ? Number(caps[tier]) : Infinity;
+        const remaining = capVal === Infinity ? '∞' : Math.max(0, capVal - spent).toFixed(6);
+        return bot.sendMessage(chatId, `Today spent: ${spent.toFixed(6)} SOL\nTier: ${tier.toUpperCase()} cap: ${capVal === Infinity ? '∞' : capVal} SOL\nRemaining: ${remaining} SOL`);
+      }
+
       if (text.startsWith("grpc set ")) {
         const addr = text.split(/\s+/)[2];
         setGrpcEndpoint(addr);
@@ -513,6 +745,83 @@ export async function startTelegramBot() {
       if (text === "jito off") {
         setUseJitoBundle(false);
         return bot.sendMessage(chatId, "Jito bundling: OFF");
+      }
+
+      if (text.startsWith("stoploss ")) {
+        const parts = text.split(/\s+/);
+        if (parts[1] === "off") {
+          const mint = parts[2];
+          stopStopLoss(chatId, mint);
+          return bot.sendMessage(chatId, `Stop-loss disabled for ${mint}`);
+        }
+        const mint = parts[1];
+        const pct = Number(parts[2] || 20);
+        startStopLoss(chatId, { mint, thresholdPct: pct, onEvent: (m)=> bot.sendMessage(chatId, m) });
+        return bot.sendMessage(chatId, `Stop-loss set at -${pct}% for ${mint}`);
+      }
+
+      if (text === "pump listen on") {
+        await startPumpFunListener(chatId, { onMint: async (mint) => {
+          try {
+            const state = getUserState(chatId);
+            const defaultSnipe = state.defaultSnipeSol ?? 0.05;
+            const priorityFeeLamports = state.maxSnipeGasPrice ?? getPriorityFeeLamports();
+            const useJitoBundle = state.enableJitoForSnipes ?? getUseJitoBundle();
+            const pollInterval = state.snipePollInterval;
+            const slippageBps = state.snipeSlippage;
+            const retryCount = state.snipeRetryCount;
+
+            if (state.autoSnipeOnPaste && (await hasUserWallet(chatId))) {
+              startLiquidityWatch(chatId, { mint, amountSol: defaultSnipe, priorityFeeLamports, useJitoBundle, pollInterval, slippageBps, retryCount, onEvent: (m) => bot.sendMessage(chatId, m) });
+              await bot.sendMessage(chatId, `Pump.fun mint detected: ${mint}\nAuto-snipe started for ${defaultSnipe} SOL`);
+            } else {
+              const kb = {
+                inline_keyboard: [
+                  [
+                    { text: `📈 Quote ${defaultSnipe} SOL`, callback_data: `AUTO_QUOTE_${mint}_${defaultSnipe}` },
+                    { text: `⚡ Buy ${defaultSnipe} SOL`, callback_data: `AUTO_BUY_${mint}_${defaultSnipe}` },
+                  ],
+                  [
+                    { text: `🎯 Snipe on LP ${defaultSnipe} SOL`, callback_data: `AUTO_SNIPE_${mint}_${defaultSnipe}` },
+                    { text: "❌ Dismiss", callback_data: `DISMISS_${Date.now()}` },
+                  ],
+                ],
+              };
+              await bot.sendMessage(chatId, `Pump.fun mint detected: ${mint}\nChoose an action:`, { reply_markup: kb });
+            }
+          } catch (e) {
+            await bot.sendMessage(chatId, `Pump.fun mint detected: ${mint}`);
+          }
+        }});
+        return bot.sendMessage(chatId, "Pump.fun listener ON");
+      }
+      if (text === "pump listen off") {
+        stopPumpFunListener(chatId);
+        return bot.sendMessage(chatId, "Pump.fun listener OFF");
+      }
+
+      if (text.startsWith("devwatch add ")) {
+        const addr = text.split(/\s+/)[2];
+        await addDevWalletToMonitor(chatId, addr);
+        return bot.sendMessage(chatId, `Added dev wallet: ${addr}`);
+      }
+      if (text === "devwatch start") {
+        await startDevWalletMonitor(chatId, { onTx: (addr, s) => bot.sendMessage(chatId, `Dev tx from ${addr}: ${s.signature}`) });
+        return bot.sendMessage(chatId, "Dev wallet monitor started");
+      }
+      if (text === "devwatch stop") {
+        stopDevWalletMonitor(chatId);
+        return bot.sendMessage(chatId, "Dev wallet monitor stopped");
+      }
+
+      if (text.startsWith("mempool watch ")) {
+        const ids = text.split(/\s+/).slice(2);
+        await startMempoolWatch(chatId, { programIds: ids, onEvent: (e)=> bot.sendMessage(chatId, `Logs from ${e.programId} at slot ${e.logs.slot}`) });
+        return bot.sendMessage(chatId, `Mempool watch on ${ids.length} programs`);
+      }
+      if (text === "mempool stop") {
+        stopMempoolWatch(chatId);
+        return bot.sendMessage(chatId, "Mempool watch stopped");
       }
 
       if (text.startsWith("quote ")) {
@@ -535,16 +844,30 @@ export async function startTelegramBot() {
       }
 
       if (text.startsWith("buy ")) {
-        const [, mint, solStr] = text.split(/\s+/);
+        const [, mint, solStr, ...flagParts] = text.split(/\s+/);
         const amountSol = parseFloat(solStr);
         if (!mint || !amountSol)
           return bot.sendMessage(chatId, "Usage: buy <MINT> <amount SOL>");
+        // Optional risk check gate
+        try {
+          const requireLpLock = String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() === "true" || process.env.REQUIRE_LP_LOCK === "1";
+          const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
+          const risk = await riskCheckToken(mint, { requireLpLock, maxBuyTaxBps });
+          if (!risk.ok) {
+            return bot.sendMessage(chatId, `🚫 Trade blocked: ${risk.reasons?.join("; ")}`);
+          }
+        } catch {}
+        const flags = parseFlags(flagParts);
         const result = await performSwap({
           inputMint: "So11111111111111111111111111111111111111112",
           outputMint: mint,
           amountSol,
           chatId,
+          ...flags,
         });
+        if (result?.txids && result.txids.length) {
+          return bot.sendMessage(chatId, `Swap submitted across ${result.txids.length} wallet(s). Tx(s):\n${result.txids.join("\n")}`);
+        }
         if (result?.txid) {
           return bot.sendMessage(
             chatId,

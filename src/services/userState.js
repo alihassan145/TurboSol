@@ -15,9 +15,13 @@ export function getUserState(chatId) {
       buyProtection: false,
       expertMode: false,
       privatePnl: false,
+      // Execution preferences
+      enablePrivateRelay: false, // use private relay for tx submission instead of public RPC when possible
+      // Wallet/positions/trades
       positions: [],
       limitOrders: [],
       watchedWallets: [],
+      trades: [],
       menuHistory: ['main'],
       // Defaults for quick actions
       defaultBuySol: 0.05,
@@ -26,9 +30,13 @@ export function getUserState(chatId) {
       autoSnipeOnPaste: false, // Auto-start snipe without confirmation on address paste
       snipeSlippage: 100, // Custom slippage for snipe operations (in BPS)
       maxSnipeGasPrice: 200000, // Max priority fee for snipe operations (lamports)
-      snipePollInterval: 2000, // Polling interval for liquidity checks (ms)
+      snipePollInterval: 300, // Polling interval for liquidity checks (ms)
       enableJitoForSnipes: true, // Use Jito bundling for snipes by default
       snipeRetryCount: 3, // Number of retry attempts on failed snipe
+      // Scaling: wallet tiering and spend caps
+      tier: 'basic',
+      tierCaps: { basic: 1, plus: 3, pro: 10 }, // daily SOL cap per tier
+      dailySpend: {}, // { YYYY-MM-DD: number }
       // For text input flows
       pendingInput: null // e.g., { type: 'IMPORT_WALLET', data: {...} }
     });
@@ -72,6 +80,54 @@ export function addPosition(chatId, position) {
   });
 }
 
+function getDateKey(ts = Date.now()) {
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+export function addTradeLog(chatId, trade) {
+  const state = getUserState(chatId);
+  const entry = { ...trade, timestamp: Date.now(), id: Date.now().toString() };
+  state.trades.push(entry);
+  if (state.trades.length > 200) state.trades = state.trades.slice(-200);
+
+  // Track daily spend for buys
+  if (entry.kind === 'buy' && typeof entry.sol === 'number') {
+    const key = getDateKey(entry.timestamp);
+    state.dailySpend[key] = (state.dailySpend[key] || 0) + Number(entry.sol);
+  }
+
+  // Lightweight adaptive tuning every 20 trades (uses latency heuristic)
+  const N = 20;
+  if (state.trades.length % N === 0) {
+    const lastN = state.trades.slice(-N);
+    const latencies = lastN.map(t => Number(t.latencyMs || 0)).filter(x => Number.isFinite(x) && x > 0);
+    const avgLat = latencies.length ? (latencies.reduce((a,b)=>a+b,0) / latencies.length) : null;
+    // Adjust snipe slippage based on observed send/confirm latency proxy
+    if (avgLat != null) {
+      if (avgLat > 900) {
+        state.snipeSlippage = clamp((state.snipeSlippage || 100) + 50, 50, 800);
+      } else if (avgLat < 350) {
+        state.snipeSlippage = clamp((state.snipeSlippage || 100) - 25, 50, 800);
+      }
+      // Adjust gas price ceiling
+      const curMax = Number(state.maxSnipeGasPrice || 200000);
+      if (avgLat > 900) {
+        state.maxSnipeGasPrice = Math.floor(curMax * 1.2);
+      } else if (avgLat < 350) {
+        state.maxSnipeGasPrice = Math.max(50000, Math.floor(curMax * 0.9));
+      }
+    }
+  }
+}
+
 export function addLimitOrder(chatId, order) {
   const state = getUserState(chatId);
   state.limitOrders.push({
@@ -95,4 +151,8 @@ export function addWatchedWallet(chatId, walletAddress, label = '') {
 export function setPendingInput(chatId, pending) {
   const state = getUserState(chatId);
   state.pendingInput = pending; // or null to clear
+}
+
+export function getAllUserStates() {
+  return Array.from(userStates.entries()); // [ [chatId, state], ... ]
 }

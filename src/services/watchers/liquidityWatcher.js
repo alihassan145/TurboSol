@@ -1,102 +1,121 @@
 import axios from "axios";
 import { performSwap } from "../trading/jupiter.js";
+import { getWalletBalance } from "../walletInfo.js";
+import { riskCheckToken } from "../risk.js";
+import { measureRpcLatency } from "../rpcMonitor.js";
 
 const activeWatchers = new Map();
-
-function key(chatId, mint) {
-  return `${chatId}:${mint}`;
-}
-
-async function hasLiquidity(mint) {
-  // Heuristic: check if quotes exist with small SOL amount
-  try {
-    const url = `${
-      process.env.JUPITER_BASE_URL || "https://quote-api.jup.ag"
-    }/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${mint}&amount=${1e7}`; // 0.01 SOL
-    const { data } = await axios.get(url, { timeout: 1200 });
-    const route = data?.data?.[0];
-    return Boolean(route);
-  } catch {
-    return false;
-  }
-}
+const JUP_BASE = process.env.JUPITER_BASE_URL || "https://quote-api.jup.ag";
 
 export function startLiquidityWatch(
   chatId,
-  { mint, amountSol, onEvent, priorityFeeLamports, useJitoBundle, pollInterval, slippageBps, retryCount }
+  { mint, amountSol, onEvent, priorityFeeLamports, useJitoBundle, pollInterval, slippageBps, retryCount, dynamicSizing, minBuySol, maxBuySol }
 ) {
-  const k = key(chatId, mint);
+  const k = `${chatId}:${mint}`;
   if (activeWatchers.has(k)) return;
 
-  const baseInterval = Math.max(400, Number(pollInterval ?? 2000));
-  const jitter = Math.min(250, Math.floor(baseInterval * 0.2));
-  const intervalMs = baseInterval + Math.floor(Math.random() * (jitter + 1));
-
+  const baseInterval = Math.max(250, Number(pollInterval ?? 300));
+  const maxAttempts = Number(retryCount ?? 3);
+  let attempts = 0;
+  let intervalMs = baseInterval;
   let stopped = false;
+
+  const checkReady = async () => {
+    // balance preflight
+    const bal = await getWalletBalance(chatId);
+    if ((bal?.sol || 0) < amountSol) {
+      onEvent?.(`Insufficient SOL (${bal?.sol || 0}). Deposit to proceed.`);
+      return false;
+    }
+    // optional risk check preflight
+    try {
+      const requireLpLock = String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() === "true" || process.env.REQUIRE_LP_LOCK === "1";
+      const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
+      const risk = await riskCheckToken(mint, { requireLpLock, maxBuyTaxBps });
+      if (!risk.ok) {
+        onEvent?.(`Blocked by risk: ${risk.reasons?.join("; ")}`);
+        return false;
+      }
+    } catch {}
+    return true;
+  };
 
   const attempt = async () => {
     if (stopped) return;
+    attempts += 1;
     try {
-      const ok = await hasLiquidity(mint);
-      if (ok) {
-        onEvent?.(`Liquidity detected for ${mint}. Buying ${amountSol} SOL...`);
-        let success = false;
-        let lastErr;
-        const maxAttempts = Math.max(1, Number(retryCount ?? 0) + 1);
-        const maxFee = (typeof priorityFeeLamports === "number" && priorityFeeLamports > 0) ? priorityFeeLamports : null;
-        for (let i = 0; i < maxAttempts; i++) {
-          try {
-            let feeToUse = priorityFeeLamports;
-            if (maxFee !== null) {
-              // Escalate from 60% to 100% of max fee across attempts
-              const ratio = Math.min(1, 0.6 + (0.4 * i) / Math.max(1, maxAttempts - 1));
-              feeToUse = Math.max(1, Math.floor(maxFee * ratio));
-            }
-            const { txid } = await performSwap({
-              inputMint: "So11111111111111111111111111111111111111112",
-              outputMint: mint,
-              amountSol,
-              slippageBps,
-              priorityFeeLamports: feeToUse,
-              useJitoBundle,
-              chatId,
-            });
-            onEvent?.(`Buy sent. Tx: ${txid}`);
-            success = true;
-            break;
-          } catch (e) {
-            lastErr = e;
-            onEvent?.(`Attempt ${i + 1} failed: ${e.message || e}`);
-            // brief delay before retry to allow routes to stabilize
-            await new Promise((r) => setTimeout(r, 200));
-          }
-        }
-        if (!success) {
-          onEvent?.(`Buy failed: ${lastErr?.message || lastErr}`);
-        }
-        // stop watcher after first detection regardless of success
-        const interval = activeWatchers.get(k);
-        if (interval) clearInterval(interval);
-        activeWatchers.delete(k);
-        stopped = true;
+      const ready = await checkReady();
+      if (!ready) return;
+      // quick readiness probe for route availability with short timeout
+      const source = axios.CancelToken.source();
+      const t = setTimeout(() => source.cancel("timeout"), 700);
+      const url = `${JUP_BASE}/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${mint}&amount=${Math.round(amountSol * 1e9)}&slippageBps=${slippageBps ?? 100}`;
+      const res = await axios.get(url, { cancelToken: source.token });
+      clearTimeout(t);
+      const route = res?.data?.data?.[0];
+      if (!route) return; // not ready yet
+
+      // Dynamic sizing based on env or param
+      const dynEnabled = dynamicSizing ?? (String(process.env.DYNAMIC_SIZING || "").toLowerCase() === "true");
+      let buyAmountSol = amountSol;
+      if (dynEnabled) {
+        const minSol = Number(minBuySol ?? process.env.MIN_BUY_SOL ?? 0.01);
+        const maxSol = Number(maxBuySol ?? process.env.MAX_BUY_SOL ?? Math.max(amountSol, 0.5));
+        const impact = Number(route.priceImpactPct ?? 0); // best-effort
+        if (impact >= 5) buyAmountSol = Math.max(minSol, amountSol * 0.5);
+        else if (impact <= 1) buyAmountSol = Math.min(maxSol, amountSol * 2);
       }
+
+      // Adaptive slippage by attempts (safe and robust without trusting priceImpact schema)
+      let slip = Number(slippageBps ?? 100);
+      slip = Math.min(800, slip + (attempts - 1) * 100);
+
+      // Priority fee optimizer from observed latency
+      let prio = priorityFeeLamports;
+      if (!prio) {
+        const lat = await measureRpcLatency().catch(()=>400);
+        if (lat < 200) prio = 50000;
+        else if (lat < 500) prio = 150000;
+        else prio = 300000;
+      }
+      if (prio && attempts <= 3) prio = Math.floor(prio * (0.7 + 0.15 * (attempts - 1)));
+
+      const { txid } = await performSwap({
+        inputMint: "So11111111111111111111111111111111111111112",
+        outputMint: mint,
+        amountSol: buyAmountSol,
+        slippageBps: slip,
+        priorityFeeLamports: prio,
+        useJitoBundle,
+        chatId,
+      });
+      onEvent?.(`Bought ${mint}. Tx: ${txid}`);
+      stopLiquidityWatch(chatId, mint);
     } catch (e) {
-      onEvent?.(`Watcher error: ${e.message || e}`);
+      // adaptive backoff up to 2x base
+      intervalMs = Math.min(baseInterval * 2, Math.floor(intervalMs * 1.25));
     }
   };
 
-  // Immediate first check for faster reaction
-  attempt();
-
   const interval = setInterval(attempt, intervalMs);
   activeWatchers.set(k, interval);
+  onEvent?.(`Watching ${mint} every ${baseInterval}ms ...`);
 }
 
-export function stopLiquidityWatch(chatId) {
+export function stopLiquidityWatch(chatId, mint) {
+  if (mint) {
+    const k = `${chatId}:${mint}`;
+    const interval = activeWatchers.get(k);
+    if (interval) clearInterval(interval);
+    activeWatchers.delete(k);
+    return true;
+  }
+  // stop all for chatId
   [...activeWatchers.entries()].forEach(([k, interval]) => {
     if (k.startsWith(`${chatId}:`)) {
       clearInterval(interval);
       activeWatchers.delete(k);
     }
   });
+  return true;
 }

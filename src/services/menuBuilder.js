@@ -220,6 +220,9 @@ export function buildTurboSolSettingsMenu(chatId) {
           { text: "🎯 Snipe Defaults", callback_data: "SNIPE_DEFAULTS" },
         ],
         [
+          { text: `🔒 Private Relay ${state.enablePrivateRelay ? "ON" : "OFF"}`, callback_data: "TOGGLE_RELAY" },
+        ],
+        [
           { text: "🔙 Back", callback_data: "MAIN_MENU" },
           { text: "❌ Close", callback_data: "CLOSE_MENU" },
         ],
