@@ -23,8 +23,8 @@ export function startLiquidityWatch(
   const checkReady = async () => {
     // balance preflight
     const bal = await getWalletBalance(chatId);
-    if ((bal?.sol || 0) < amountSol) {
-      onEvent?.(`Insufficient SOL (${bal?.sol || 0}). Deposit to proceed.`);
+    if ((bal?.solBalance || 0) < amountSol) {
+      onEvent?.(`Insufficient SOL (${bal?.solBalance || 0}). Deposit to proceed.`);
       return false;
     }
     // optional risk check preflight

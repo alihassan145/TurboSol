@@ -1,17 +1,20 @@
 import fs from "fs";
 import path from "path";
 
-const DATA_DIR = path.resolve(process.env.DATA_DIR || "./data/trades");
+function getDataDir() {
+  return path.resolve(process.env.DATA_DIR || "./data/trades");
+}
 
 function ensureDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  const dir = getDataDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
 }
 
 function getFilePath(chatId) {
   ensureDir();
-  return path.join(DATA_DIR, `${chatId}.jsonl`);
+  return path.join(getDataDir(), `${chatId}.jsonl`);
 }
 
 // Append a trade entry as JSON Lines for efficient streaming analytics

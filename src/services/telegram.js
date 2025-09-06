@@ -891,6 +891,14 @@ export async function startTelegramBot() {
             );
             return;
           }
+          // Explicit wallet pre-check
+          if (!(await hasUserWallet(chatId))) {
+            await bot.sendMessage(
+              chatId,
+              "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet."
+            );
+            return;
+          }
           // Risk check
           try {
             const requireLpLock =
@@ -906,25 +914,19 @@ export async function startTelegramBot() {
                 chatId,
                 `🚫 Trade blocked: ${risk.reasons?.join("; ")}`
               );
-              setPendingInput(chatId, null);
               return;
             }
           } catch {}
+
           const { txid } = await performSwap({
             inputMint: "So11111111111111111111111111111111111111112",
             outputMint: tokenAddress,
             amountSol,
             chatId,
           });
-          await bot.sendMessage(
-            chatId,
-            `✅ Quick Buy executed!\nAmount: ${amountSol} SOL\nToken: ${tokenAddress}\nTx: ${txid}`
-          );
+          await bot.sendMessage(chatId, `Buy sent. Tx: ${txid}`);
         } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            `❌ Quick Buy failed: ${e?.message || e}`
-          );
+          await bot.sendMessage(chatId, `❌ Quick Buy failed: ${e?.message || e}`);
         }
         setPendingInput(chatId, null);
         return;
@@ -1418,6 +1420,13 @@ export async function startTelegramBot() {
         const amountSol = parseFloat(solStr);
         if (!mint || !amountSol)
           return bot.sendMessage(chatId, "Usage: buy <MINT> <amount SOL>");
+        // Explicit wallet pre-check
+        if (!(await hasUserWallet(chatId))) {
+          return bot.sendMessage(
+            chatId,
+            "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet."
+          );
+        }
         // Optional risk check gate
         try {
           const requireLpLock =
@@ -1462,6 +1471,13 @@ export async function startTelegramBot() {
         const amountSol = parseFloat(solStr);
         if (!mint || !amountSol)
           return bot.sendMessage(chatId, "Usage: snipe <MINT> <amount SOL>");
+        // Explicit wallet pre-check
+        if (!(await hasUserWallet(chatId))) {
+          return bot.sendMessage(
+            chatId,
+            "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet."
+          );
+        }
         const priorityFeeLamports = getPriorityFeeLamports();
         const useJitoBundle = getUseJitoBundle();
         startLiquidityWatch(chatId, {
