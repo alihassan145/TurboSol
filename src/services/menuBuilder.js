@@ -213,14 +213,13 @@ export function buildTurboSolSettingsMenu(chatId) {
           { text: "💼 Wallets", callback_data: "WALLETS_MENU" },
           { text: "⚙ Fee Settings", callback_data: "FEE_SETTINGS" },
         ],
+        [{ text: "🌐 RPC Settings", callback_data: "RPC_SETTINGS" }],
+        [{ text: "🎯 Snipe Defaults", callback_data: "SNIPE_DEFAULTS" }],
         [
-          { text: "🌐 RPC Settings", callback_data: "RPC_SETTINGS" },
-        ],
-        [
-          { text: "🎯 Snipe Defaults", callback_data: "SNIPE_DEFAULTS" },
-        ],
-        [
-          { text: `🔒 Private Relay ${state.enablePrivateRelay ? "ON" : "OFF"}`, callback_data: "TOGGLE_RELAY" },
+          {
+            text: `🔒 Private Relay ${state.enablePrivateRelay ? "ON" : "OFF"}`,
+            callback_data: "TOGGLE_RELAY",
+          },
         ],
         [
           { text: "🔙 Back", callback_data: "MAIN_MENU" },
@@ -234,7 +233,7 @@ export function buildTurboSolSettingsMenu(chatId) {
 // New: Wallets management menu
 export async function buildWalletsMenu(chatId) {
   const wallets = await listUserWallets(chatId);
-  
+
   const keyboard = [
     [
       { text: "➕ Create Wallet", callback_data: "CREATE_WALLET" },
@@ -243,9 +242,11 @@ export async function buildWalletsMenu(chatId) {
   ];
 
   // Add existing wallets
-  for (const wallet of wallets.slice(0, 8)) { // Limit to 8 wallets for UI
+  for (const wallet of wallets.slice(0, 8)) {
+    // Limit to 8 wallets for UI
     const activeIndicator = wallet.active ? "✅ " : "";
-    const shortAddress = wallet.publicKey.slice(0, 6) + "..." + wallet.publicKey.slice(-4);
+    const shortAddress =
+      wallet.publicKey.slice(0, 6) + "..." + wallet.publicKey.slice(-4);
     keyboard.push([
       {
         text: `${activeIndicator}${wallet.name} (${shortAddress})`,
@@ -254,9 +255,7 @@ export async function buildWalletsMenu(chatId) {
     ]);
   }
 
-  keyboard.push([
-    { text: "🔙 Back to Settings", callback_data: "SETTINGS" },
-  ]);
+  keyboard.push([{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }]);
 
   return {
     reply_markup: {
@@ -268,8 +267,8 @@ export async function buildWalletsMenu(chatId) {
 // New: Individual wallet details menu
 export async function buildWalletDetailsMenu(chatId, walletId) {
   const wallets = await listUserWallets(chatId);
-  const wallet = wallets.find(w => w.id === walletId);
-  
+  const wallet = wallets.find((w) => w.id === walletId);
+
   if (!wallet) {
     return {
       reply_markup: {
@@ -281,13 +280,13 @@ export async function buildWalletDetailsMenu(chatId, walletId) {
   }
 
   const keyboard = [];
-  
+
   if (!wallet.active) {
     keyboard.push([
       { text: "✅ Set as Active", callback_data: `SET_ACTIVE_${walletId}` },
     ]);
   }
-  
+
   keyboard.push([
     { text: "✏️ Rename", callback_data: `RENAME_WALLET_${walletId}` },
     { text: "📋 Copy Address", callback_data: `COPY_ADDRESS_${walletId}` },
@@ -329,30 +328,50 @@ export function buildSupportMenu() {
 // New: Build Snipe Defaults menu
 export function buildSnipeDefaultsMenu(chatId) {
   const state = getUserState(chatId);
-  const autoPasteText = state.autoSnipeOnPaste ? "Auto-Snipe on Paste: ON" : "Auto-Snipe on Paste: OFF";
-  const jitoText = state.enableJitoForSnipes ? "Jito for Snipes: ON" : "Jito for Snipes: OFF";
+  const autoPasteText = state.autoSnipeOnPaste
+    ? "Auto-Snipe on Paste: ON"
+    : "Auto-Snipe on Paste: OFF";
+  const jitoText = state.enableJitoForSnipes
+    ? "Jito for Snipes: ON"
+    : "Jito for Snipes: OFF";
   return {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: `Default Buy: ${state.defaultBuySol} SOL`, callback_data: "SET_DEFAULT_BUY" },
-          { text: `Default Snipe: ${state.defaultSnipeSol} SOL`, callback_data: "SET_DEFAULT_SNIPE" },
+          {
+            text: `Default Buy: ${state.defaultBuySol} SOL`,
+            callback_data: "SET_DEFAULT_BUY",
+          },
+          {
+            text: `Default Snipe: ${state.defaultSnipeSol} SOL`,
+            callback_data: "SET_DEFAULT_SNIPE",
+          },
         ],
         [
-          { text: `Snipe Slippage: ${state.snipeSlippage} bps`, callback_data: "SET_SNIPE_SLIPPAGE" },
-          { text: `Max Priority Fee: ${state.maxSnipeGasPrice || "auto"}`, callback_data: "SET_SNIPE_FEE" },
+          {
+            text: `Snipe Slippage: ${state.snipeSlippage} bps`,
+            callback_data: "SET_SNIPE_SLIPPAGE",
+          },
+          {
+            text: `Max Priority Fee: ${state.maxSnipeGasPrice || "auto"}`,
+            callback_data: "SET_SNIPE_FEE",
+          },
         ],
         [
           { text: autoPasteText, callback_data: "TOGGLE_AUTO_SNIPE_PASTE" },
           { text: jitoText, callback_data: "TOGGLE_SNIPE_JITO" },
         ],
         [
-          { text: `Poll Interval: ${state.snipePollInterval}ms`, callback_data: "SET_SNIPE_INTERVAL" },
-          { text: `Retry Count: ${state.snipeRetryCount}`, callback_data: "SET_SNIPE_RETRY" },
+          {
+            text: `Poll Interval: ${state.snipePollInterval}ms`,
+            callback_data: "SET_SNIPE_INTERVAL",
+          },
+          {
+            text: `Retry Count: ${state.snipeRetryCount}`,
+            callback_data: "SET_SNIPE_RETRY",
+          },
         ],
-        [
-          { text: "🔙 Back to Settings", callback_data: "SETTINGS" },
-        ],
+        [{ text: "🔙 Back to Settings", callback_data: "SETTINGS" }],
       ],
     },
   };

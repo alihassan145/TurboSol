@@ -6,12 +6,43 @@ import { startDashboardServer } from "./services/dashboard.js";
 import { initializeWallet } from "./services/wallet.js";
 import { connectWalletsDb } from "./services/userWallets.js";
 import { getAllUserStates } from "./services/userState.js";
+import { initSnipeStore, loadActiveSnipes } from "./services/snipeStore.js";
+import { startLiquidityWatch } from "./services/watchers/liquidityWatcher.js";
 
 async function main() {
   await connectWalletsDb();
   await initializeWallet();
+  await initSnipeStore().catch(() => false);
   await startTelegramBot();
   await startDashboardServer();
+
+  // Resume active snipes from persistence
+  try {
+    const bot = getBotInstance();
+    const jobs = await loadActiveSnipes();
+    for (const job of jobs) {
+      const { chatId, mint, amountSol, settings = {} } = job;
+      startLiquidityWatch(chatId, {
+        mint,
+        amountSol,
+        priorityFeeLamports: settings.priorityFeeLamports,
+        useJitoBundle: settings.useJitoBundle,
+        pollInterval: settings.pollInterval,
+        slippageBps: settings.slippageBps,
+        retryCount: settings.retryCount,
+        dynamicSizing: settings.dynamicSizing,
+        minBuySol: settings.minBuySol,
+        maxBuySol: settings.maxBuySol,
+        onEvent: (m) => bot?.sendMessage?.(chatId, m),
+      });
+      bot?.sendMessage?.(
+        chatId,
+        `⏯ Resumed active snipe watcher for ${mint} (${amountSol} SOL).`
+      );
+    }
+  } catch (e) {
+    console.error("Failed to resume snipes:", e?.message || e);
+  }
 
   // Daily P&L report scheduler
   const REPORT_HOUR = Number(process.env.DAILY_REPORT_HOUR || 23);

@@ -7,16 +7,206 @@ import {
 } from "../wallet.js";
 import { VersionedTransaction, PublicKey } from "@solana/web3.js";
 import { rotateRpc, sendTransactionRaced } from "../rpc.js";
-import { submitBundle, submitBundleWithTarget, serializeToBase64 } from "../jito.js";
+import {
+  submitBundle,
+  submitBundleWithTarget,
+  serializeToBase64,
+} from "../jito.js";
 import { addPosition, addTradeLog, getUserState } from "../userState.js";
 import { riskCheckToken } from "../risk.js";
 import { getAdaptivePriorityFee } from "../fees.js";
 import { getAdaptiveSlippageBps } from "../slippage.js";
 import { getAllUserWalletKeypairs, hasUserWallet } from "../userWallets.js";
 import { getSolPriceUSD } from "../walletInfo.js";
+import { log } from "@grpc/grpc-js/build/src/logging.js";
 
 const JUP_BASE = process.env.JUPITER_BASE_URL || "https://quote-api.jup.ag";
 const SOL_MINT = "So11111111111111111111111111111111111111112";
+const JUP_DEBUG =
+  String(process.env.JUP_DEBUG || "").toLowerCase() === "true" ||
+  process.env.JUP_DEBUG === "1";
+
+// Retry helpers to mitigate 429s and transient errors from Jupiter
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+function isRetryableError(err) {
+  const status = err?.response?.status;
+  if (status === 429) return true;
+  if (status >= 500 && status < 600) return true;
+  const code = err?.code;
+  if (code === "ECONNRESET" || code === "ETIMEDOUT" || code === "ECONNABORTED")
+    return true;
+  const msg = err?.message || "";
+  if (msg.toLowerCase().includes("timeout")) return true;
+  return false;
+}
+
+// Lightweight global concurrency + min-gap limiter for Jupiter HTTP attempts
+const MAX_CONCURRENCY = Number(process.env.JUP_CONCURRENCY || 1);
+const MIN_GAP_MS = Number(process.env.JUP_MIN_GAP_MS || 700);
+let inFlight = 0;
+let lastStartAt = 0;
+const waitQueue = [];
+async function scheduleJupAttempt() {
+  return new Promise((resolve) => {
+    const tryStart = async () => {
+      const now = Date.now();
+      const gap = now - lastStartAt;
+      if (inFlight < MAX_CONCURRENCY && gap >= MIN_GAP_MS) {
+        inFlight += 1;
+        lastStartAt = now;
+        resolve(() => {
+          inFlight = Math.max(0, inFlight - 1);
+          const next = waitQueue.shift();
+          if (next) setTimeout(next, MIN_GAP_MS);
+        });
+      } else {
+        waitQueue.push(tryStart);
+      }
+    };
+    tryStart();
+  });
+}
+
+function parseRetryAfterMs(err) {
+  const h = err?.response?.headers || {};
+  const ra = h["retry-after"] || h["Retry-After"];
+  if (!ra) return null;
+  const n = Number(ra);
+  if (Number.isFinite(n)) return Math.max(0, Math.floor(n * 1000));
+  const ts = Date.parse(ra);
+  if (Number.isFinite(ts)) return Math.max(0, ts - Date.now());
+  return null;
+}
+
+// Short-lived cache and in-flight deduplication for identical quote URLs
+const QUOTE_CACHE_TTL = Number(process.env.JUP_QUOTE_CACHE_MS || 2500);
+const quoteCache = new Map(); // url -> { at, resp }
+const inflightQuotes = new Map(); // url -> Promise
+
+async function httpGetWithRetry(
+  url,
+  options = {},
+  retries = 6,
+  baseDelayMs = 350,
+  maxDelayMs = 4000
+) {
+  const isQuote =
+    typeof url === "string" && url.startsWith(`${JUP_BASE}/v6/quote`);
+  if (JUP_DEBUG && isQuote) console.log(`[JUP] GET ${url}`);
+
+  async function coreGet() {
+    let attempt = 0;
+    while (true) {
+      if (JUP_DEBUG && isQuote) console.log("[JUP] trying to get quote");
+
+      let release;
+      try {
+        release = await scheduleJupAttempt();
+        const merged = {
+          timeout: 2200,
+          ...options,
+          headers: {
+            "User-Agent": "TurboSolBot/1.0",
+            Accept: "application/json",
+            ...(options?.headers || {}),
+          },
+        };
+        const result = await axios.get(url, merged);
+
+        if (JUP_DEBUG && isQuote)
+          console.log(`[JUP] response ${result.status} ${result.statusText}`);
+
+        return result;
+      } catch (e) {
+        attempt++;
+        if (attempt > retries || !isRetryableError(e)) throw e;
+        const retryAfter = parseRetryAfterMs(e);
+        const backoff = baseDelayMs * 2 ** (attempt - 1);
+        const jitter = Math.floor(Math.random() * 180);
+        const delay = Math.min(
+          retryAfter != null
+            ? Math.max(retryAfter, backoff) + jitter
+            : backoff + jitter,
+          maxDelayMs
+        );
+        await sleep(delay);
+      } finally {
+        try {
+          release && release();
+        } catch {}
+      }
+    }
+  }
+
+  if (isQuote && QUOTE_CACHE_TTL > 0) {
+    const cached = quoteCache.get(url);
+    const now = Date.now();
+    if (cached && now - cached.at <= QUOTE_CACHE_TTL) {
+      return cached.resp;
+    }
+    const inflight = inflightQuotes.get(url);
+    if (inflight) return await inflight;
+    const p = (async () => {
+      try {
+        const resp = await coreGet();
+        quoteCache.set(url, { at: Date.now(), resp });
+        return resp;
+      } finally {
+        inflightQuotes.delete(url);
+      }
+    })();
+    inflightQuotes.set(url, p);
+    return await p;
+  }
+  return await coreGet();
+}
+
+async function httpPostWithRetry(
+  url,
+  body,
+  options = {},
+  retries = 6,
+  baseDelayMs = 350,
+  maxDelayMs = 4000
+) {
+  let attempt = 0;
+  while (true) {
+    let release;
+    try {
+      release = await scheduleJupAttempt();
+      const merged = {
+        timeout: 3000,
+        ...options,
+        headers: {
+          "User-Agent": "TurboSolBot/1.0",
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...(options?.headers || {}),
+        },
+      };
+      return await axios.post(url, body, merged);
+    } catch (e) {
+      attempt++;
+      if (attempt > retries || !isRetryableError(e)) throw e;
+      const retryAfter = parseRetryAfterMs(e);
+      const backoff = baseDelayMs * 2 ** (attempt - 1);
+      const jitter = Math.floor(Math.random() * 200);
+      const delay = Math.min(
+        retryAfter != null
+          ? Math.max(retryAfter, backoff) + jitter
+          : backoff + jitter,
+        maxDelayMs
+      );
+      await sleep(delay);
+    } finally {
+      try {
+        release && release();
+      } catch {}
+    }
+  }
+}
 
 // Best-effort Dexscreener fetch for liquidity and price
 async function fetchDexTokenInfo(mint, timeoutMs = 1200) {
@@ -39,7 +229,45 @@ async function fetchDexTokenInfo(mint, timeoutMs = 1200) {
 }
 
 function toLamports(sol) {
-  return Math.round(Number(sol) * 1e9);
+  return Math.floor(Number(sol) * 1e9);
+}
+
+// Generic raw quote helper (input/output can be any mint; amountRaw is base units of inputMint)
+export async function getQuoteRaw({
+  inputMint,
+  outputMint,
+  amountRaw,
+  slippageBps,
+  timeoutMs,
+}) {
+  const slippage =
+    slippageBps ?? Number(process.env.DEFAULT_SLIPPAGE_BPS || 100);
+  const url = `${JUP_BASE}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${slippage}`;
+  const { data } = await httpGetWithRetry(
+    url,
+    timeoutMs ? { timeout: timeoutMs } : undefined
+  );
+
+  const route = data;
+  return route || null;
+}
+
+// Cache for mint decimals to avoid repeated RPC calls
+const mintDecimalsCache = new Map();
+async function getMintDecimalsCached(mint) {
+  if (mintDecimalsCache.has(mint)) return mintDecimalsCache.get(mint);
+  try {
+    const conn = getConnection();
+    const info = await conn.getParsedAccountInfo(new PublicKey(mint));
+    const decimals = info?.value?.data?.parsed?.info?.decimals;
+    if (decimals != null) {
+      mintDecimalsCache.set(mint, Number(decimals));
+      return Number(decimals);
+    }
+  } catch (e) {
+    // swallow; we'll handle undefined decimals upstream
+  }
+  return undefined;
 }
 
 export async function getTokenQuote({
@@ -52,16 +280,39 @@ export async function getTokenQuote({
   const slippage =
     slippageBps ?? Number(process.env.DEFAULT_SLIPPAGE_BPS || 100);
   const url = `${JUP_BASE}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippage}`;
-  const { data } = await axios.get(url);
-  const route = data?.data?.[0];
+  const { data } = await httpGetWithRetry(url);
+  console.log('[JUPITER] Raw API Response:', JSON.stringify(data, null, 2));
+  console.log('[JUPITER] Response Validation:', {
+    hasOutAmount: !!data.outAmount,
+    hasFormatted: !!data.outAmountFormatted,
+    routeExists: data.routePlan?.length > 0
+  });
+
+  const route = data;
   if (!route) return null;
-  const outAmountFormatted = route.outAmount / 10 ** route.outToken.decimals;
+
+  // Determine decimals from route token info or fall back to on-chain mint data
+  let decimals = route?.outToken?.decimals;
+  if (decimals == null) {
+    decimals = await getMintDecimalsCached(outputMint);
+  }
+
+  const outAmountFormatted =
+    decimals != null
+      ? Number(route.outAmount) / 10 ** Number(decimals)
+      : Number(route.outAmount);
+
   return {
     route,
     outAmountFormatted,
-    outputSymbol: route.outToken.symbol,
-    routeName: route.marketInfos?.map((m) => m.amm.label).join(">") || "route",
-    priceImpactPct: Math.round(route.priceImpactPct * 10000) / 100,
+    outputSymbol: route?.outToken?.symbol,
+    routeName:
+      route?.routePlan?.map((p) => p?.swapInfo?.label).join(">") ||
+      (route?.routePlan ? "routePlan" : "route"),
+    priceImpactPct:
+      route?.priceImpactPct != null
+        ? Math.round(route.priceImpactPct * 10000) / 100
+        : undefined,
   };
 }
 
@@ -81,9 +332,12 @@ export async function performSwap({
   adaptiveSplit, // optional override
 }) {
   // Enforce user wallet context and disallow admin fallback
-  if (chatId == null) throw new Error("Trading requires user wallet context (chatId)");
+  if (chatId == null)
+    throw new Error("Trading requires user wallet context (chatId)");
   if (!(await hasUserWallet(chatId))) {
-    throw new Error("User wallet not found. Use /setup to create or /import to add one.");
+    throw new Error(
+      "User wallet not found. Use /setup to create or /import to add one."
+    );
   }
   const connection = await getUserConnectionInstance(chatId);
   const wallet = await getUserWalletInstance(chatId);
@@ -161,10 +415,11 @@ export async function performSwap({
           const baseBps = Number(process.env.MAX_NOTIONAL_BPS_OF_LIQ || 30); // baseline 0.30%
           let targetBps = baseBps;
           const tiered =
-            String(process.env.ADAPTIVE_LIQ_TIER || "").toLowerCase() === "true" ||
-            process.env.ADAPTIVE_LIQ_TIER === "1";
+            String(process.env.ADAPTIVE_LIQ_TIER || "").toLowerCase() ===
+              "true" || process.env.ADAPTIVE_LIQ_TIER === "1";
           if (tiered && Number.isFinite(liqUsd) && liqUsd > 0) {
-            if (liqUsd < 50000) targetBps = Math.max(5, Math.floor(baseBps * 0.5));
+            if (liqUsd < 50000)
+              targetBps = Math.max(5, Math.floor(baseBps * 0.5));
             else if (liqUsd < 150000) targetBps = Math.floor(baseBps * 0.75);
             else if (liqUsd > 500000) targetBps = Math.floor(baseBps * 1.5);
           }
@@ -178,21 +433,25 @@ export async function performSwap({
             amountSol = adjusted;
             amountAfterLiq = Number(amountSol);
           }
-        
+
           // Optional: adapt amount to target price impact via Jupiter quotes
           const enableImpact =
-            String(process.env.ADAPTIVE_IMPACT || "").toLowerCase() === "true" ||
-            process.env.ADAPTIVE_IMPACT === "1";
+            String(process.env.ADAPTIVE_IMPACT || "").toLowerCase() ===
+              "true" || process.env.ADAPTIVE_IMPACT === "1";
           let appliedImpact = false;
           let finalImpactPct = null;
           let tries = 0;
           if (enableImpact) {
             try {
-              const targetImpactBps = Number(process.env.TARGET_PRICE_IMPACT_BPS || 80); // default 0.80%
+              const targetImpactBps = Number(
+                process.env.TARGET_PRICE_IMPACT_BPS || 80
+              ); // default 0.80%
               const targetImpactPct = targetImpactBps / 100;
               const minSol = Number(process.env.MIN_BUY_SOL ?? 0.01);
               let testSol = Number(amountSol);
-              const maxTries = Number(process.env.ADAPTIVE_IMPACT_MAX_TRIES || 3);
+              const maxTries = Number(
+                process.env.ADAPTIVE_IMPACT_MAX_TRIES || 3
+              );
               for (let i = 0; i < maxTries; i++) {
                 tries++;
                 const q = await getTokenQuote({
@@ -215,18 +474,30 @@ export async function performSwap({
               amountSol = testSol;
             } catch {}
           }
-        
+
           try {
             console.log(
-              `[sizing][buy] liqUsd=${liqUsd} solPrice=${solPrice} baseBps=${baseBps} targetBps=${targetBps} maxSolByLiq=${Number.isFinite(maxSolByLiq) ? maxSolByLiq.toFixed(6) : 'n/a'} original=${originalAmountSol} afterLiq=${amountAfterLiq} final=${amountSol} appliedLiqCap=${appliedLiqCap} appliedImpact=${appliedImpact} impactPct=${finalImpactPct ?? 'n/a'} tries=${tries}`
+              `[sizing][buy] liqUsd=${liqUsd} solPrice=${solPrice} baseBps=${baseBps} targetBps=${targetBps} maxSolByLiq=${
+                Number.isFinite(maxSolByLiq) ? maxSolByLiq.toFixed(6) : "n/a"
+              } original=${originalAmountSol} afterLiq=${amountAfterLiq} final=${amountSol} appliedLiqCap=${appliedLiqCap} appliedImpact=${appliedImpact} impactPct=${
+                finalImpactPct ?? "n/a"
+              } tries=${tries}`
             );
           } catch {}
         }
-        if (enableSplit && chatId != null && (walletsCount == null || walletsCount <= 0)) {
+        if (
+          enableSplit &&
+          chatId != null &&
+          (walletsCount == null || walletsCount <= 0)
+        ) {
           const solPrice = await getSolPriceUSD().catch(() => undefined);
           if (solPrice && solPrice > 0) {
-            const perWalletUsd = Number(process.env.ADAPTIVE_WALLET_USD_TARGET || 400);
-            const needed = Math.ceil((amountSol * solPrice) / Math.max(1, perWalletUsd));
+            const perWalletUsd = Number(
+              process.env.ADAPTIVE_WALLET_USD_TARGET || 400
+            );
+            const needed = Math.ceil(
+              (amountSol * solPrice) / Math.max(1, perWalletUsd)
+            );
             if (needed > 1) {
               splitAcrossWallets = true;
               walletsCount = needed;
@@ -243,8 +514,8 @@ export async function performSwap({
       ? !!usePrivateRelay
       : chatId != null
       ? !!getUserState(chatId).enablePrivateRelay
-      : String(process.env.ENABLE_PRIVATE_RELAY || "").toLowerCase() === "true" ||
-        process.env.ENABLE_PRIVATE_RELAY === "1";
+      : String(process.env.ENABLE_PRIVATE_RELAY || "").toLowerCase() ===
+          "true" || process.env.ENABLE_PRIVATE_RELAY === "1";
 
   // Multi-wallet split flow
   if (splitAcrossWallets || (walletsCount && walletsCount > 1)) {
@@ -256,7 +527,7 @@ export async function performSwap({
 
     // Enforce a minimum per-wallet SOL notional for buys
     let perWalletSol = Number(amountSol) / useCount;
-    const minPerWalletSol = Number(process.env.MIN_PER_WALLET_SOL || 0.005);
+    const minPerWalletSol = Number(process.env.MIN_PER_WALLET_SOL || 0.01);
     if (perWalletSol < minPerWalletSol) {
       const maxWalletsByMin = Math.max(
         1,
@@ -276,10 +547,10 @@ export async function performSwap({
       const perWalletMeta = [];
       for (const w of selected) {
         const qUrl = `${JUP_BASE}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${perLamports}&slippageBps=${slippage}`;
-        const qRes = await axios.get(qUrl);
-        const route = qRes?.data?.data?.[0];
+        const qRes = await httpGetWithRetry(qUrl);
+        const route = qRes?.data;
         if (!route) throw new Error("No route for split");
-        const swapRes = await axios.post(`${JUP_BASE}/v6/swap`, {
+        const swapRes = await httpPostWithRetry(`${JUP_BASE}/v6/swap`, {
           quoteResponse: route,
           userPublicKey: w.keypair.publicKey.toBase58(),
           wrapAndUnwrapSol: true,
@@ -293,9 +564,10 @@ export async function performSwap({
         tx.sign([w.keypair]);
         signedTxs.push(tx);
         signedBase64.push(serializeToBase64(tx));
+        const decOut = route?.outToken?.decimals ?? (await getMintDecimalsCached(outputMint));
         const tokensOut =
-          route?.outAmount && route?.outToken?.decimals != null
-            ? route.outAmount / 10 ** route.outToken.decimals
+          route?.outAmount && decOut != null
+            ? Number(route.outAmount) / 10 ** Number(decOut)
             : undefined;
         perWalletMeta.push({ w, tokensOut, route });
       }
@@ -376,10 +648,10 @@ export async function performSwap({
     for (const w of selected) {
       try {
         const qUrl = `${JUP_BASE}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${perLamports}&slippageBps=${slippage}`;
-        const qRes = await axios.get(qUrl);
-        const route = qRes?.data?.data?.[0];
+        const qRes = await httpGetWithRetry(qUrl);
+        const route = qRes?.data;
         if (!route) throw new Error("No route for split");
-        const swapRes = await axios.post(`${JUP_BASE}/v6/swap`, {
+        const swapRes = await httpPostWithRetry(`${JUP_BASE}/v6/swap`, {
           quoteResponse: route,
           userPublicKey: w.keypair.publicKey.toBase58(),
           wrapAndUnwrapSol: true,
@@ -420,345 +692,357 @@ export async function performSwap({
     return { txids: results };
   }
 
-    // Single-wallet flow
-    const amount = toLamports(amountSol);
-    const slippageVal = slippage;
-    const qUrl = `${JUP_BASE}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageVal}`;
-    const { data } = await axios.get(qUrl);
-    const route = data?.data?.[0];
-    if (!route) throw new Error("No route");
-    const swapRes = await axios.post(`${JUP_BASE}/v6/swap`, {
-      quoteResponse: route,
-      userPublicKey: wallet.publicKey.toBase58(),
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: priorityFeeLamports ?? "auto",
-    });
-    const swapTx = swapRes?.data?.swapTransaction;
-    if (!swapTx) throw new Error("No swap transaction returned");
-    const tx = VersionedTransaction.deserialize(Buffer.from(swapTx, "base64"));
-    tx.sign([wallet]);
+  // Single-wallet flow
+  const amount = toLamports(amountSol);
+  const qUrl = `${JUP_BASE}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippage}`;
+  const qRes = await httpGetWithRetry(qUrl);
+  const route = qRes?.data;
+  if (!route) throw new Error("No route");
+  const swapRes = await httpPostWithRetry(`${JUP_BASE}/v6/swap`, {
+    quoteResponse: route,
+    userPublicKey: wallet.publicKey.toBase58(),
+    wrapAndUnwrapSol: true,
+    dynamicComputeUnitLimit: true,
+    prioritizationFeeLamports: priorityFeeLamports ?? "auto",
+  });
+  const swapTx = swapRes?.data?.swapTransaction;
+  if (!swapTx) throw new Error("No swap transaction returned");
+  const tx = VersionedTransaction.deserialize(Buffer.from(swapTx, "base64"));
+  tx.sign([wallet]);
 
-    const t0 = Date.now();
-    let txid;
-    let via = "rpc";
-    try {
-      if (useJitoBundle) {
-        const base64Signed = serializeToBase64(tx);
-        const resp = await submitBundleWithTarget([base64Signed]);
-        txid = resp?.uuid || "bundle_submitted";
-        via = "jito";
-      } else {
-        txid = await sendTransactionRaced(tx, {
-          skipPreflight: true,
-          usePrivateRelay: shouldUsePrivateRelay,
-        });
-      }
-    } catch (e) {
-      // fallback single send
-      rotateRpc("race failed");
-      txid = await connection.sendRawTransaction(tx.serialize(), {
+  const t0 = Date.now();
+  let txid;
+  let via = "rpc";
+  try {
+    if (useJitoBundle) {
+      const base64Signed = serializeToBase64(tx);
+      const resp = await submitBundleWithTarget([base64Signed]);
+      txid = resp?.uuid || "bundle_submitted";
+      via = "jito";
+    } else {
+      txid = await sendTransactionRaced(tx, {
         skipPreflight: true,
+        usePrivateRelay: shouldUsePrivateRelay,
       });
     }
-    const latencyMs = Date.now() - t0;
+  } catch (e) {
+    // fallback single send
+    rotateRpc("race failed");
+    txid = await connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: true,
+    });
+  }
+  const latencyMs = Date.now() - t0;
 
+  try {
+    const outTokens =
+      route?.outAmount && route?.outToken?.decimals != null
+        ? route.outAmount / 10 ** route?.outToken.decimals
+        : undefined;
+    const avgPrice = outTokens ? Number(amountSol) / outTokens : undefined;
+    const slot = await connection.getSlot().catch(() => undefined);
+    addPosition(chatId, {
+      mint: outputMint,
+      symbol: route?.outToken?.symbol || "TOKEN",
+      solIn: amountSol,
+      tokensOut: outTokens,
+      avgPriceSolPerToken: avgPrice,
+      txid,
+      status: "open",
+      source: via,
+      sendLatencyMs: latencyMs,
+      slot,
+    });
+    addTradeLog(chatId, {
+      kind: "buy",
+      mint: outputMint,
+      sol: amountSol,
+      txid,
+      latencyMs,
+      slot,
+    });
+  } catch {}
+
+  return { txid };
+}
+
+// Sell helper: swap token -> SOL
+export async function performSell({
+  tokenMint,
+  amountTokens, // optional exact token units (not lamports)
+  percent = 100, // percentage of balance to sell if amountTokens not provided
+  slippageBps,
+  priorityFeeLamports,
+  useJitoBundle = false,
+  usePrivateRelay, // optional override
+  splitAcrossWallets = false,
+  walletsCount,
+  chatId,
+  adaptiveSplit, // optional override for adaptive split on sell
+}) {
+  // Enforce user wallet context and disallow admin fallback
+  if (chatId == null)
+    throw new Error("Trading requires user wallet context (chatId)");
+  if (!(await hasUserWallet(chatId))) {
+    throw new Error(
+      "User wallet not found. Use /setup to create or /import to add one."
+    );
+  }
+  const connection = await getUserConnectionInstance(chatId);
+  const wallet = await getUserWalletInstance(chatId);
+
+  // Auto-priority fee if not supplied
+  if (priorityFeeLamports == null) {
     try {
-      const outTokens =
-        route?.outAmount && route?.outToken?.decimals != null
-          ? route.outAmount / 10 ** route?.outToken.decimals
-          : undefined;
-      const avgPrice = outTokens ? Number(amountSol) / outTokens : undefined;
-      const slot = await connection.getSlot().catch(() => undefined);
-      addPosition(chatId, {
-        mint: outputMint,
-        symbol: route?.outToken?.symbol || "TOKEN",
-        solIn: amountSol,
-        tokensOut: outTokens,
-        avgPriceSolPerToken: avgPrice,
-        txid,
-        status: "open",
-        source: via,
-        sendLatencyMs: latencyMs,
-        slot,
-      });
-      addTradeLog(chatId, {
-        kind: "buy",
-        mint: outputMint,
-        sol: amountSol,
-        txid,
-        latencyMs,
-        slot,
-      });
+      priorityFeeLamports = await getAdaptivePriorityFee(connection);
     } catch {}
-
-    return { txid };
   }
 
-  // Sell helper: swap token -> SOL
-  export async function performSell({
-    tokenMint,
-    amountTokens, // optional exact token units (not lamports)
-    percent = 100, // percentage of balance to sell if amountTokens not provided
-    slippageBps,
-    priorityFeeLamports,
-    useJitoBundle = false,
-    usePrivateRelay, // optional override
-    splitAcrossWallets = false,
-    walletsCount,
-    chatId,
-    adaptiveSplit, // optional override for adaptive split on sell
-  }) {
-    // Enforce user wallet context and disallow admin fallback
-    if (chatId == null) throw new Error("Trading requires user wallet context (chatId)");
-    if (!(await hasUserWallet(chatId))) {
-      throw new Error("User wallet not found. Use /setup to create or /import to add one.");
-    }
-    const connection = await getUserConnectionInstance(chatId);
-    const wallet = await getUserWalletInstance(chatId);
-
-    // Auto-priority fee if not supplied
-    if (priorityFeeLamports == null) {
-      try {
-        priorityFeeLamports = await getAdaptivePriorityFee(connection);
-      } catch {}
-    }
-
-    // Resolve slippage value
-    let slippage;
-    if (slippageBps != null) {
-      slippage = slippageBps;
-    } else {
-      try {
-        slippage = await getAdaptiveSlippageBps();
-      } catch {
-        slippage = Number(process.env.DEFAULT_SLIPPAGE_BPS || 100);
-      }
-    }
-
-    // Adaptive split for sells when explicit amount is provided
+  // Resolve slippage value
+  let slippage;
+  if (slippageBps != null) {
+    slippage = slippageBps;
+  } else {
     try {
-      const enableSplit =
-        adaptiveSplit != null
-          ? !!adaptiveSplit
-          : String(process.env.ADAPTIVE_SPLIT || "").toLowerCase() === "true" ||
-            process.env.ADAPTIVE_SPLIT === "1";
-      if (enableSplit && amountTokens != null && chatId != null && (walletsCount == null || walletsCount <= 0)) {
-        const dex = await fetchDexTokenInfo(tokenMint).catch(() => null);
-        const priceUsd = dex?.priceUsd;
-        const liqUsd = Number(dex?.liquidityUsd || 0);
-        if (priceUsd && priceUsd > 0) {
-          const totalUsd = Number(amountTokens) * priceUsd;
-          const basePerWalletUsd = Number(process.env.ADAPTIVE_WALLET_USD_TARGET || 400);
-          let perWalletUsd = basePerWalletUsd;
-          const tiered =
-            String(process.env.ADAPTIVE_LIQ_TIER || "").toLowerCase() === "true" ||
-            process.env.ADAPTIVE_LIQ_TIER === "1";
-          if (tiered && Number.isFinite(liqUsd) && liqUsd > 0) {
-            if (liqUsd < 50000) perWalletUsd = Math.max(100, Math.floor(basePerWalletUsd * 0.5));
-            else if (liqUsd < 150000) perWalletUsd = Math.floor(basePerWalletUsd * 0.75);
-            else if (liqUsd > 500000) perWalletUsd = Math.floor(basePerWalletUsd * 1.5);
-          }
-          const needed = Math.ceil(totalUsd / Math.max(1, perWalletUsd));
-          if (needed > 1) {
-            splitAcrossWallets = true;
-            walletsCount = needed;
-          }
+      slippage = await getAdaptiveSlippageBps();
+    } catch {
+      slippage = Number(process.env.DEFAULT_SLIPPAGE_BPS || 100);
+    }
+  }
+
+  // Adaptive split for sells when explicit amount is provided
+  try {
+    const enableSplit =
+      adaptiveSplit != null
+        ? !!adaptiveSplit
+        : String(process.env.ADAPTIVE_SPLIT || "").toLowerCase() === "true" ||
+          process.env.ADAPTIVE_SPLIT === "1";
+    if (
+      enableSplit &&
+      amountTokens != null &&
+      chatId != null &&
+      (walletsCount == null || walletsCount <= 0)
+    ) {
+      const dex = await fetchDexTokenInfo(tokenMint).catch(() => null);
+      const priceUsd = dex?.priceUsd;
+      const liqUsd = Number(dex?.liquidityUsd || 0);
+      if (priceUsd && priceUsd > 0) {
+        const totalUsd = Number(amountTokens) * priceUsd;
+        const basePerWalletUsd = Number(
+          process.env.ADAPTIVE_WALLET_USD_TARGET || 400
+        );
+        let perWalletUsd = basePerWalletUsd;
+        const tiered =
+          String(process.env.ADAPTIVE_LIQ_TIER || "").toLowerCase() ===
+            "true" || process.env.ADAPTIVE_LIQ_TIER === "1";
+        if (tiered && Number.isFinite(liqUsd) && liqUsd > 0) {
+          if (liqUsd < 50000)
+            perWalletUsd = Math.max(100, Math.floor(basePerWalletUsd * 0.5));
+          else if (liqUsd < 150000)
+            perWalletUsd = Math.floor(basePerWalletUsd * 0.75);
+          else if (liqUsd > 500000)
+            perWalletUsd = Math.floor(basePerWalletUsd * 1.5);
+        }
+        const needed = Math.ceil(totalUsd / Math.max(1, perWalletUsd));
+        if (needed > 1) {
+          splitAcrossWallets = true;
+          walletsCount = needed;
         }
       }
-    } catch {}
+    }
+  } catch {}
 
-    // Multi-wallet split flow
-    if (splitAcrossWallets || (walletsCount && walletsCount > 1)) {
-      if (!(chatId !== undefined && chatId !== null))
-        throw new Error("Split sell requires user context (chatId)");
-      const wallets = await getAllUserWalletKeypairs(chatId);
-      if (!wallets.length) throw new Error("No wallets available for split");
-      const useCount = Math.min(walletsCount || wallets.length, wallets.length);
-      const selected = wallets.slice(0, useCount);
-      const results = [];
-      const t0All = Date.now();
-      for (const w of selected) {
-        try {
-          const owner = w.keypair.publicKey;
-          const tokenPk = new PublicKey(tokenMint);
-          const resp = await connection.getParsedTokenAccountsByOwner(owner, {
-            mint: tokenPk,
-          });
-          const acct = resp.value?.[0]?.account?.data?.parsed?.info;
-          if (!acct) throw new Error("Token account not found");
-          const decimals = Number(acct.tokenAmount?.decimals || 0);
-          const balanceRaw = BigInt(acct.tokenAmount?.amount || "0");
-          if (balanceRaw === 0n) throw new Error("Zero token balance");
-          let amountRaw;
-          if (amountTokens != null) {
-            const perWallet = Number(amountTokens) / useCount;
-            amountRaw = BigInt(Math.floor(perWallet * 10 ** decimals));
-          } else {
-            const p = Math.max(1, Math.min(100, Math.floor(percent)));
-            amountRaw = (balanceRaw * BigInt(p)) / 100n;
-          }
-          if (amountRaw <= 0n) throw new Error("Amount to sell is zero");
-          // using outer slippage
-          const quoteUrl = `${JUP_BASE}/v6/quote?inputMint=${tokenMint}&outputMint=${SOL_MINT}&amount=${amountRaw.toString()}&slippageBps=${slippage}`;
-          const quoteRes = await axios.get(quoteUrl);
-          const route = quoteRes?.data?.data?.[0];
-          if (!route) throw new Error("No route for sell");
-          const swapRes = await axios.post(`${JUP_BASE}/v6/swap`, {
-            quoteResponse: route,
-            userPublicKey: owner.toBase58(),
-            wrapAndUnwrapSol: true,
-            dynamicComputeUnitLimit: true,
-            prioritizationFeeLamports: priorityFeeLamports ?? "auto",
-          });
-          const swapTx = swapRes?.data?.swapTransaction;
-          if (!swapTx) throw new Error("No swap transaction returned");
-          const tx = VersionedTransaction.deserialize(
-            Buffer.from(swapTx, "base64")
-          );
-          tx.sign([w.keypair]);
-          const shouldUsePrivateRelay =
-            usePrivateRelay != null
-              ? !!usePrivateRelay
-              : chatId != null
-              ? !!getUserState(chatId).enablePrivateRelay
-              : false;
-          let txid;
-          const t0 = Date.now();
-          if (useJitoBundle) {
-            const base64Signed = serializeToBase64(tx);
-            try {
-              const resp = await submitBundleWithTarget([base64Signed]);
-              txid = resp?.uuid || "bundle_submitted";
-            } catch (e) {
-              try {
-                txid = await sendTransactionRaced(tx, {
-                  skipPreflight: true,
-                  usePrivateRelay: shouldUsePrivateRelay,
-                });
-              } catch (e2) {
-                rotateRpc("race failed");
-                txid = await connection.sendRawTransaction(tx.serialize(), {
-                  skipPreflight: true,
-                });
-              }
-            }
-          } else {
+  // Multi-wallet split flow
+  if (splitAcrossWallets || (walletsCount && walletsCount > 1)) {
+    if (!(chatId !== undefined && chatId !== null))
+      throw new Error("Split sell requires user context (chatId)");
+    const wallets = await getAllUserWalletKeypairs(chatId);
+    if (!wallets.length) throw new Error("No wallets available for split");
+    const useCount = Math.min(walletsCount || wallets.length, wallets.length);
+    const selected = wallets.slice(0, useCount);
+    const results = [];
+    const t0All = Date.now();
+    for (const w of selected) {
+      try {
+        const owner = w.keypair.publicKey;
+        const tokenPk = new PublicKey(tokenMint);
+        const resp = await connection.getParsedTokenAccountsByOwner(owner, {
+          mint: tokenPk,
+        });
+        const acct = resp.value?.[0]?.account?.data?.parsed?.info;
+        if (!acct) throw new Error("Token account not found");
+        const decimals = Number(acct.tokenAmount?.decimals || 0);
+        const balanceRaw = BigInt(acct.tokenAmount?.amount || "0");
+        if (balanceRaw === 0n) throw new Error("Zero token balance");
+        let amountRaw;
+        if (amountTokens != null) {
+          const perWallet = Number(amountTokens) / useCount;
+          amountRaw = BigInt(Math.floor(perWallet * 10 ** decimals));
+        } else {
+          const p = Math.max(1, Math.min(100, Math.floor(percent)));
+          amountRaw = (balanceRaw * BigInt(p)) / 100n;
+        }
+        if (amountRaw <= 0n) throw new Error("Amount to sell is zero");
+        // using outer slippage
+        const quoteUrl = `${JUP_BASE}/v6/quote?inputMint=${tokenMint}&outputMint=${SOL_MINT}&amount=${amountRaw.toString()}&slippageBps=${slippage}`;
+        const quoteRes = await httpGetWithRetry(quoteUrl);
+        const route = quoteRes?.data;
+        if (!route) throw new Error("No route for sell");
+        const swapRes = await httpPostWithRetry(`${JUP_BASE}/v6/swap`, {
+          quoteResponse: route,
+          userPublicKey: owner.toBase58(),
+          wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true,
+          prioritizationFeeLamports: priorityFeeLamports ?? "auto",
+        });
+        const swapTx = swapRes?.data?.swapTransaction;
+        if (!swapTx) throw new Error("No swap transaction returned");
+        const tx = VersionedTransaction.deserialize(
+          Buffer.from(swapTx, "base64")
+        );
+        tx.sign([w.keypair]);
+        const shouldUsePrivateRelay =
+          usePrivateRelay != null
+            ? !!usePrivateRelay
+            : chatId != null
+            ? !!getUserState(chatId).enablePrivateRelay
+            : false;
+        let txid;
+        const t0 = Date.now();
+        if (useJitoBundle) {
+          const base64Signed = serializeToBase64(tx);
+          try {
+            const resp = await submitBundleWithTarget([base64Signed]);
+            txid = resp?.uuid || "bundle_submitted";
+          } catch (e) {
             try {
               txid = await sendTransactionRaced(tx, {
                 skipPreflight: true,
                 usePrivateRelay: shouldUsePrivateRelay,
               });
-            } catch (e) {
+            } catch (e2) {
               rotateRpc("race failed");
               txid = await connection.sendRawTransaction(tx.serialize(), {
                 skipPreflight: true,
               });
             }
           }
-          const latencyMs = Date.now() - t0;
-          results.push(txid);
+        } else {
           try {
-            addTradeLog(chatId, {
-              kind: "sell",
-              mint: tokenMint,
-              solOut: route?.outAmount && route?.outToken?.decimals != null ? route.outAmount / 10 ** route.outToken.decimals : undefined,
-              txid,
-              latencyMs,
+            txid = await sendTransactionRaced(tx, {
+              skipPreflight: true,
+              usePrivateRelay: shouldUsePrivateRelay,
             });
-          } catch {}
-        } catch (e) {
-          // continue other wallets
+          } catch (e) {
+            rotateRpc("race failed");
+            txid = await connection.sendRawTransaction(tx.serialize(), {
+              skipPreflight: true,
+            });
+          }
         }
-      }
-      return { txids: results };
-    }
-
-    // Single-wallet sell flow
-    const owner = wallet.publicKey;
-    const tokenPk = new PublicKey(tokenMint);
-    const resp = await connection.getParsedTokenAccountsByOwner(owner, {
-      mint: tokenPk,
-    });
-    const acct = resp.value?.[0]?.account?.data?.parsed?.info;
-    if (!acct) throw new Error("Token account not found");
-    const decimals = Number(acct.tokenAmount?.decimals || 0);
-    const balanceRaw = BigInt(acct.tokenAmount?.amount || "0");
-    let amountRaw;
-    if (amountTokens != null) {
-      amountRaw = BigInt(Math.floor(Number(amountTokens) * 10 ** decimals));
-    } else {
-      const p = Math.max(1, Math.min(100, Math.floor(percent)));
-      amountRaw = (balanceRaw * BigInt(p)) / 100n;
-    }
-    if (amountRaw <= 0n) throw new Error("Amount to sell is zero");
-
-    const quoteUrl = `${JUP_BASE}/v6/quote?inputMint=${tokenMint}&outputMint=${SOL_MINT}&amount=${amountRaw.toString()}&slippageBps=${slippage}`;
-    const quoteRes = await axios.get(quoteUrl);
-    const route = quoteRes?.data?.data?.[0];
-    if (!route) throw new Error("No route for sell");
-    const swapRes = await axios.post(`${JUP_BASE}/v6/swap`, {
-      quoteResponse: route,
-      userPublicKey: owner.toBase58(),
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: priorityFeeLamports ?? "auto",
-    });
-    const swapTx = swapRes?.data?.swapTransaction;
-    if (!swapTx) throw new Error("No swap transaction returned");
-    const tx = VersionedTransaction.deserialize(Buffer.from(swapTx, "base64"));
-    tx.sign([wallet]);
-    let txid;
-    const t0 = Date.now();
-    const shouldUsePrivateRelay =
-      usePrivateRelay != null
-        ? !!usePrivateRelay
-        : chatId != null
-        ? !!getUserState(chatId).enablePrivateRelay
-        : false;
-    if (useJitoBundle) {
-      const base64Signed = serializeToBase64(tx);
-      try {
-        const resp = await submitBundleWithTarget([base64Signed]);
-        txid = resp?.uuid || "bundle_submitted";
-      } catch (e) {
+        const latencyMs = Date.now() - t0;
+        results.push(txid);
         try {
-          txid = await sendTransactionRaced(tx, {
-            skipPreflight: true,
-            usePrivateRelay: shouldUsePrivateRelay,
+          addTradeLog(chatId, {
+            kind: "sell",
+            mint: tokenMint,
+            solOut:
+              route?.outAmount && route?.outToken?.decimals != null
+                ? route.outAmount / 10 ** route.outToken.decimals
+                : undefined,
+            txid,
+            latencyMs,
           });
-        } catch (e2) {
-          rotateRpc("race failed");
-          txid = await connection.sendRawTransaction(tx.serialize(), {
-            skipPreflight: true,
-          });
-        }
+        } catch {}
+      } catch (e) {
+        // continue other wallets
       }
-    } else {
+    }
+    return { txids: results };
+  }
+
+  // Single-wallet sell flow
+  const owner = wallet.publicKey;
+  const tokenPk = new PublicKey(tokenMint);
+  const resp = await connection.getParsedTokenAccountsByOwner(owner, {
+    mint: tokenPk,
+  });
+  const acct = resp.value?.[0]?.account?.data?.parsed?.info;
+  if (!acct) throw new Error("Token account not found");
+  const decimals = Number(acct.tokenAmount?.decimals || 0);
+  const balanceRaw = BigInt(acct.tokenAmount?.amount || "0");
+  let amountRaw;
+  if (amountTokens != null) {
+    amountRaw = BigInt(Math.floor(Number(amountTokens) * 10 ** decimals));
+  } else {
+    const p = Math.max(1, Math.min(100, Math.floor(percent)));
+    amountRaw = (balanceRaw * BigInt(p)) / 100n;
+  }
+  if (amountRaw <= 0n) throw new Error("Amount to sell is zero");
+
+  const quoteUrl = `${JUP_BASE}/v6/quote?inputMint=${tokenMint}&outputMint=${SOL_MINT}&amount=${amountRaw.toString()}&slippageBps=${slippage}`;
+  const quoteRes = await httpGetWithRetry(quoteUrl);
+  const route = quoteRes?.data;
+  if (!route) throw new Error("No route for sell");
+  const swapRes = await httpPostWithRetry(`${JUP_BASE}/v6/swap`, {
+    quoteResponse: route,
+    userPublicKey: owner.toBase58(),
+    wrapAndUnwrapSol: true,
+    dynamicComputeUnitLimit: true,
+    prioritizationFeeLamports: priorityFeeLamports ?? "auto",
+  });
+  const swapTx = swapRes?.data?.swapTransaction;
+  if (!swapTx) throw new Error("No swap transaction returned");
+  const tx = VersionedTransaction.deserialize(Buffer.from(swapTx, "base64"));
+  tx.sign([wallet]);
+  let txid;
+  const t0 = Date.now();
+  const shouldUsePrivateRelay =
+    usePrivateRelay != null
+      ? !!usePrivateRelay
+      : chatId != null
+      ? !!getUserState(chatId).enablePrivateRelay
+      : false;
+  if (useJitoBundle) {
+    const base64Signed = serializeToBase64(tx);
+    try {
+      const resp = await submitBundleWithTarget([base64Signed]);
+      txid = resp?.uuid || "bundle_submitted";
+    } catch (e) {
       try {
         txid = await sendTransactionRaced(tx, {
           skipPreflight: true,
           usePrivateRelay: shouldUsePrivateRelay,
         });
-      } catch (e) {
+      } catch (e2) {
         rotateRpc("race failed");
         txid = await connection.sendRawTransaction(tx.serialize(), {
           skipPreflight: true,
         });
       }
     }
-    const latencyMs = Date.now() - t0;
+  } else {
     try {
-      addTradeLog(chatId, {
-        kind: "sell",
-        mint: tokenMint,
-        solOut:
-          route?.outAmount && route?.outToken?.decimals != null
-            ? route.outAmount / 10 ** route.outToken.decimals
-            : undefined,
-        txid,
-        latencyMs,
+      txid = await sendTransactionRaced(tx, {
+        skipPreflight: true,
+        usePrivateRelay: shouldUsePrivateRelay,
       });
-    } catch {}
-    return { txid };
+    } catch (e) {
+      rotateRpc("race failed");
+      txid = await connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: true,
+      });
+    }
   }
+  const latencyMs = Date.now() - t0;
+  try {
+    addTradeLog(chatId, {
+      kind: "sell",
+      mint: tokenMint,
+      solOut: route?.outAmount ? Number(route.outAmount) / 1e9 : undefined,
+      txid,
+      latencyMs,
+    });
+  } catch {}
+  return { txid };
+}

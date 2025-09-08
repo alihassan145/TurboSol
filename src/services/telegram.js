@@ -59,6 +59,7 @@ import {
   stopMempoolWatch,
 } from "./watchers/mempoolWatcher.js";
 import { measureEndpointsLatency } from "./rpcMonitor.js";
+import { loadActiveSnipesByChat, markSnipeCancelled } from "./snipeStore.js";
 
 function parseFlags(parts) {
   const flags = {};
@@ -76,6 +77,17 @@ function parseFlags(parts) {
 
 let bot;
 
+// Per-chat action debounce to reduce bursty API calls that can cause 429s
+const lastActionAt = new Map();
+function canProceed(chatId, key, minIntervalMs = 800) {
+  const now = Date.now();
+  const k = `${chatId}:${key}`;
+  const prev = lastActionAt.get(k) || 0;
+  if (now - prev < minIntervalMs) return false;
+  lastActionAt.set(k, now);
+  return true;
+}
+
 function buildMainMenu(chatId) {
   return {
     chat_id: chatId,
@@ -90,6 +102,7 @@ function buildMainMenu(chatId) {
           { text: "Snipe LP Add", callback_data: "SNIPE_LP" },
           { text: "Stop Snipe", callback_data: "STOP_SNIPE" },
         ],
+        [{ text: "📋 Active Snipes", callback_data: "ACTIVE_SNIPES" }],
         [
           { text: "Quote", callback_data: "QUOTE" },
           { text: "⚙️ Settings", callback_data: "SETTINGS" },
@@ -213,7 +226,7 @@ export async function startTelegramBot() {
         const welcome = await buildTurboSolWelcomeMessage(chatId);
         await bot.sendMessage(chatId, welcome);
         return bot.sendMessage(chatId, "Choose an option:", {
-          reply_markup: buildTurboSolMainMenu(),
+          reply_markup: buildMainMenu(chatId).reply_markup,
         });
       }
       if (data === "CLOSE_MENU") {
@@ -233,6 +246,100 @@ export async function startTelegramBot() {
         return;
       }
 
+      if (data === "ACTIVE_SNIPES") {
+        try {
+          const items = await loadActiveSnipesByChat(chatId);
+          const lines = (items || []).map((i) => {
+            const shortMint = i.mint
+              ? i.mint.slice(0, 6) + "…" + i.mint.slice(-4)
+              : "?";
+            const started = i.startedAt
+              ? new Date(i.startedAt).toLocaleTimeString()
+              : "?";
+            return `• ${shortMint} — ${i.amountSol} SOL (since ${started})`;
+          });
+          const keyboard = [
+            ...(items || []).map((i) => [
+              {
+                text: `🛑 Stop ${i.mint.slice(0, 6)}…${i.mint.slice(-4)}`,
+                callback_data: `STOP_SNIPE_BY_${i.mint}`,
+              },
+            ]),
+            [{ text: "⛔ Stop All", callback_data: "STOP_SNIPE" }],
+            [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
+          ];
+          const body = lines.length
+            ? `📋 Active Snipes (${lines.length})\n\n${lines.join("\n")}`
+            : "No active snipes for this chat.";
+          try {
+            await bot.editMessageText(body, {
+              chat_id: chatId,
+              message_id: messageId,
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          } catch (e) {
+            await bot.sendMessage(chatId, body, {
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          }
+        } catch (e) {
+          await bot.answerCallbackQuery(query.id, { text: "Failed to load" });
+        }
+        return;
+      }
+
+      if (data.startsWith("STOP_SNIPE_BY_")) {
+        const mint = data.replace("STOP_SNIPE_BY_", "");
+        try {
+          stopLiquidityWatch(chatId, mint);
+          try {
+            await markSnipeCancelled(chatId, mint, "stopped_by_user");
+          } catch {}
+          await bot.answerCallbackQuery(query.id, {
+            text: `Stopped ${mint.slice(0, 6)}…${mint.slice(-4)}`,
+          });
+        } catch (e) {
+          await bot.answerCallbackQuery(query.id, { text: "Failed to stop" });
+        }
+        // Refresh the active snipes view
+        try {
+          const items = await loadActiveSnipesByChat(chatId);
+          const lines = (items || []).map((i) => {
+            const shortMint = i.mint
+              ? i.mint.slice(0, 6) + "…" + i.mint.slice(-4)
+              : "?";
+            const started = i.startedAt
+              ? new Date(i.startedAt).toLocaleTimeString()
+              : "?";
+            return `• ${shortMint} — ${i.amountSol} SOL (since ${started})`;
+          });
+          const keyboard = [
+            ...(items || []).map((i) => [
+              {
+                text: `🛑 Stop ${i.mint.slice(0, 6)}…${i.mint.slice(-4)}`,
+                callback_data: `STOP_SNIPE_BY_${i.mint}`,
+              },
+            ]),
+            [{ text: "⛔ Stop All", callback_data: "STOP_SNIPE" }],
+            [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
+          ];
+          const body = lines.length
+            ? `📋 Active Snipes (${lines.length})\n\n${lines.join("\n")}`
+            : "No active snipes for this chat.";
+          try {
+            await bot.editMessageText(body, {
+              chat_id: chatId,
+              message_id: messageId,
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          } catch (e) {
+            await bot.sendMessage(chatId, body, {
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          }
+        } catch {}
+        return;
+      }
       if (data === "QUICK_BUY") {
         try {
           await bot.answerCallbackQuery(query.id, { text: "Quick Buy" });
@@ -312,20 +419,37 @@ export async function startTelegramBot() {
 
       // Handle auto-detected token actions
       if (data.startsWith("AUTO_QUOTE_")) {
-        const rest = data.slice("AUTO_QUOTE_".length);
-        const [mint, amtStr] = rest.split("_");
-        const amountSol = parseFloat(amtStr);
-        const res = await getTokenQuote({
-          inputMint: "So11111111111111111111111111111111111111112",
-          outputMint: mint,
-          amountSol,
-        });
-        if (!res || !res.outAmountFormatted)
-          return bot.answerCallbackQuery(query.id, { text: "Quote failed" });
-        await bot.sendMessage(
-          chatId,
-          `Quote for ${amountSol} SOL -> ${mint}: ${res.outAmountFormatted} tokens (impact ${res.priceImpactPct}%)`
-        );
+        try {
+          if (!canProceed(chatId, "AUTO_QUOTE", 700)) {
+            await bot.answerCallbackQuery(query.id, { text: "Please wait…" });
+            return;
+          }
+          const rest = data.slice("AUTO_QUOTE_".length);
+          const [mint, amtStr] = rest.split("_");
+          const amountSol = parseFloat(amtStr);
+          const res = await getTokenQuote({
+            inputMint: "So11111111111111111111111111111111111111112",
+            outputMint: mint,
+            amountSol,
+          });
+          console.log('[DEBUG] Quote Result:', res);
+          -          console.log('[TELEGRAM] Quote Validation:', { outAmount: res?.outAmount, outAmountFormatted: res?.outAmountFormatted });
+          +          console.log('[TELEGRAM] Quote Validation:', { outAmount: res?.route?.outAmount, outAmountFormatted: res?.outAmountFormatted });
+          
+          if (!res || res.outAmountFormatted == null) {
+            await bot.answerCallbackQuery(query.id, { text: "Quote failed" });
+            return;
+          }
+          
+          await bot.sendMessage(
+            chatId,
+            `Quote for ${amountSol} SOL -> ${mint}: ${res.outAmountFormatted} tokens (impact ${res.priceImpactPct}%)`
+          );
+        } catch (e) {
+          console.error('Auto quote failed:', e);
+          await bot.answerCallbackQuery(query.id, { text: "Quote error" });
+          await bot.sendMessage(chatId, `❌ Quote failed: ${e?.message || e}`);
+        }
         return;
       }
 
@@ -438,7 +562,7 @@ export async function startTelegramBot() {
         await bot.editMessageText("🏠 Main Menu", {
           chat_id: chatId,
           message_id: messageId,
-          reply_markup: buildTurboSolMainMenu(),
+          reply_markup: buildMainMenu(chatId).reply_markup,
         });
         return;
       }
@@ -891,6 +1015,13 @@ export async function startTelegramBot() {
             );
             return;
           }
+          if (!canProceed(chatId, "QUICK_BUY_EXECUTE", 1600)) {
+            await bot.sendMessage(
+              chatId,
+              "⏳ Please wait a moment before sending another buy."
+            );
+            return;
+          }
           // Explicit wallet pre-check
           if (!(await hasUserWallet(chatId))) {
             await bot.sendMessage(
@@ -918,6 +1049,13 @@ export async function startTelegramBot() {
             }
           } catch {}
 
+          // Immediate feedback so user knows we're proceeding
+          console.log('[TELEGRAM] Quick Buy executing', { tokenAddress, amountSol });
+          await bot.sendMessage(
+            chatId,
+            `⏳ Placing buy of ${amountSol} SOL for token ${tokenAddress}...`
+          );
+
           const { txid } = await performSwap({
             inputMint: "So11111111111111111111111111111111111111112",
             outputMint: tokenAddress,
@@ -926,7 +1064,10 @@ export async function startTelegramBot() {
           });
           await bot.sendMessage(chatId, `Buy sent. Tx: ${txid}`);
         } catch (e) {
-          await bot.sendMessage(chatId, `❌ Quick Buy failed: ${e?.message || e}`);
+          await bot.sendMessage(
+            chatId,
+            `❌ Quick Buy failed: ${e?.message || e}`
+          );
         }
         setPendingInput(chatId, null);
         return;
@@ -1033,13 +1174,25 @@ export async function startTelegramBot() {
             );
             return;
           }
+          if (!canProceed(chatId, "QUOTE_EXECUTE", 1200)) {
+            await bot.sendMessage(
+              chatId,
+              "⏳ Please wait a moment before requesting another quote."
+            );
+            return;
+          }
           const res = await getTokenQuote({
             inputMint: "So11111111111111111111111111111111111111112",
             outputMint: tokenAddress,
             amountSol,
           });
-          if (!res || !res.outAmountFormatted) {
-            await bot.sendMessage(chatId, "❌ Failed to fetch quote.");
+          console.log('[DEBUG] Quote Result:', res);
+          console.log('[TELEGRAM] Quote Validation:', { outAmount: res?.outAmount, outAmountFormatted: res?.outAmountFormatted });
+if (!res || res.outAmountFormatted == null) {
+            await bot.sendMessage(
+              chatId,
+              "❌ Failed to fetch quote. No route found or insufficient liquidity."
+            );
           } else {
             await bot.sendMessage(
               chatId,
@@ -1053,366 +1206,37 @@ export async function startTelegramBot() {
         return;
       }
 
-      // Handle pending Snipe Defaults numeric inputs
-      if (
-        [
-          "SET_DEFAULT_BUY",
-          "SET_DEFAULT_SNIPE",
-          "SET_SNIPE_SLIPPAGE",
-          "SET_SNIPE_FEE",
-          "SET_SNIPE_INTERVAL",
-          "SET_SNIPE_RETRY",
-        ].includes(state.pendingInput?.type)
-      ) {
-        const pending = state.pendingInput;
-        const t = pending.type;
-        const vNum = Number(text);
-        if (Number.isNaN(vNum) || vNum < 0) {
-          await bot.sendMessage(chatId, "Invalid number. Please try again.");
-          return;
-        }
-        const keyMap = {
-          SET_DEFAULT_BUY: "defaultBuySol",
-          SET_DEFAULT_SNIPE: "defaultSnipeSol",
-          SET_SNIPE_SLIPPAGE: "snipeSlippage",
-          SET_SNIPE_FEE: "maxSnipeGasPrice",
-          SET_SNIPE_INTERVAL: "snipePollInterval",
-          SET_SNIPE_RETRY: "snipeRetryCount",
-        };
-        const key = keyMap[t];
-        const val =
-          t === "SET_SNIPE_FEE" && vNum === 0
-            ? undefined
-            : t === "SET_DEFAULT_BUY" || t === "SET_DEFAULT_SNIPE"
-            ? Number(vNum.toFixed(6))
-            : Math.floor(vNum);
-        updateUserSetting(chatId, key, val);
-        setPendingInput(chatId, null);
-        await bot.sendMessage(chatId, "Updated.");
-        const mid = pending?.data?.messageId;
-        if (mid) {
-          try {
-            await bot.editMessageReplyMarkup(
-              buildSnipeDefaultsMenu(chatId).reply_markup,
-              { chat_id: chatId, message_id: mid }
-            );
-          } catch {}
-        }
-        return;
-      }
-
-      // Text-based commands
-      if (text === "rpc list") {
-        const list = listRpcEndpoints()
-          .map((r) => `${r.active ? "*" : "-"} ${r.url}`)
-          .join("\n");
-        return bot.sendMessage(chatId, `RPCs:\n${list}`);
-      }
-      if (text.startsWith("rpc add ")) {
-        const url = text.split(/\s+/)[2];
-        addRpcEndpoint(url);
-        const list = listRpcEndpoints()
-          .map((r) => `${r.active ? "*" : "-"} ${r.url}`)
-          .join("\n");
-        return bot.sendMessage(chatId, `Added. RPCs:\n${list}`);
-      }
-      if (text === "rpc rotate") {
-        rotateRpc("manual");
-        const list = listRpcEndpoints()
-          .map((r) => `${r.active ? "*" : "-"} ${r.url}`)
-          .join("\n");
-        return bot.sendMessage(chatId, `Rotated. RPCs:\n${list}`);
-      }
-      if (text === "rpc bench") {
-        try {
-          const urls = getAllRpcEndpoints();
-          if (!urls.length)
-            return bot.sendMessage(chatId, "No RPC endpoints configured");
-          const ranked = await measureEndpointsLatency(urls);
-          const lines = ranked.map(
-            (r, i) =>
-              `${i + 1}. ${r.url} — ${
-                r.latency === Number.MAX_SAFE_INTEGER
-                  ? "fail"
-                  : r.latency + "ms"
-              }`
-          );
-          return bot.sendMessage(
-            chatId,
-            `RPC Benchmark (fastest first):\n${lines.join("\n")}`
-          );
-        } catch (e) {
-          return bot.sendMessage(chatId, `Benchmark error: ${e.message || e}`);
-        }
-      }
-      if (text === "trades") {
-        const state = getUserState(chatId);
-        const trades = (state.trades || []).slice(-10).reverse();
-        if (!trades.length)
-          return bot.sendMessage(chatId, "No trades logged yet.");
-        const fmt = (t) => {
-          const ts = new Date(t.timestamp).toLocaleTimeString();
-          const shortMint = t.mint
-            ? t.mint.slice(0, 6) + "…" + t.mint.slice(-4)
-            : "?";
-          if (t.kind === "buy")
-            return `${ts} BUY ${shortMint} — ${t.sol} SOL  [${
-              t.latencyMs || "?"
-            }ms${t.slot ? ", slot " + t.slot : ""}]`;
-          if (t.kind === "sell")
-            return `${ts} SELL ${shortMint} — amtRaw=${t.amountRaw}  [${
-              t.latencyMs || "?"
-            }ms${t.slot ? ", slot " + t.slot : ""}]`;
-          return `${ts} ${t.kind || "trade"} ${shortMint}`;
-        };
-        return bot.sendMessage(
-          chatId,
-          `Last trades:\n${trades.map(fmt).join("\n")}`
-        );
-      }
-
-      // Tier management commands
-      if (text === "tier") {
-        const s = getUserState(chatId);
-        const tier = (s.tier || "basic").toLowerCase();
-        const caps = s.tierCaps || {};
-        const todayKey = new Date().toISOString().slice(0, 10);
-        const spent = Number(s.dailySpend?.[todayKey] || 0);
-        const capVal = caps[tier] != null ? Number(caps[tier]) : Infinity;
-        const remaining =
-          capVal === Infinity ? "∞" : Math.max(0, capVal - spent).toFixed(6);
-        const capsLine = `basic=${caps.basic ?? "-"} SOL, plus=${
-          caps.plus ?? "-"
-        } SOL, pro=${caps.pro ?? "-"} SOL`;
-        return bot.sendMessage(
-          chatId,
-          `Current tier: ${tier.toUpperCase()}\nCaps: ${capsLine}\nToday spent: ${spent.toFixed(
-            6
-          )} SOL\nRemaining: ${remaining} SOL`
-        );
-      }
-      if (text.startsWith("tier set ")) {
-        const target = text.split(/\s+/)[2]?.toLowerCase();
-        if (!["basic", "plus", "pro"].includes(target)) {
-          return bot.sendMessage(chatId, "Usage: tier set <basic|plus|pro>");
-        }
-        updateUserSetting(chatId, "tier", target);
-        return bot.sendMessage(chatId, `Tier set to ${target.toUpperCase()}`);
-      }
-      if (text.startsWith("tier caps")) {
-        const parts = text.split(/\s+/);
-        const s = getUserState(chatId);
-        const caps = { ...(s.tierCaps || {}) };
-        if (parts.length >= 4) {
-          const t = parts[2]?.toLowerCase();
-          const val = Number(parts[3]);
-          if (
-            !["basic", "plus", "pro"].includes(t) ||
-            !Number.isFinite(val) ||
-            val < 0
-          ) {
-            return bot.sendMessage(
-              chatId,
-              "Usage: tier caps <basic|plus|pro> <SOL cap>"
-            );
-          }
-          caps[t] = val;
-          updateUserSetting(chatId, "tierCaps", caps);
-          return bot.sendMessage(
-            chatId,
-            `Updated ${t.toUpperCase()} cap to ${val} SOL`
-          );
-        } else {
-          const capsLine = `basic=${caps.basic ?? "-"} SOL, plus=${
-            caps.plus ?? "-"
-          } SOL, pro=${caps.pro ?? "-"} SOL`;
-          return bot.sendMessage(chatId, `Current caps: ${capsLine}`);
-        }
-      }
-      if (text === "daily spend") {
-        const s = getUserState(chatId);
-        const tier = (s.tier || "basic").toLowerCase();
-        const caps = s.tierCaps || {};
-        const todayKey = new Date().toISOString().slice(0, 10);
-        const spent = Number(s.dailySpend?.[todayKey] || 0);
-        const capVal = caps[tier] != null ? Number(caps[tier]) : Infinity;
-        const remaining =
-          capVal === Infinity ? "∞" : Math.max(0, capVal - spent).toFixed(6);
-        return bot.sendMessage(
-          chatId,
-          `Today spent: ${spent.toFixed(
-            6
-          )} SOL\nTier: ${tier.toUpperCase()} cap: ${
-            capVal === Infinity ? "∞" : capVal
-          } SOL\nRemaining: ${remaining} SOL`
-        );
-      }
-
-      if (text.startsWith("grpc set ")) {
-        const addr = text.split(/\s+/)[2];
-        setGrpcEndpoint(addr);
-        return bot.sendMessage(chatId, `gRPC endpoint set: ${addr}`);
-      }
-      if (text.startsWith("fee ")) {
-        const lamports = Number(text.split(/\s+/)[1]);
-        setPriorityFeeLamports(lamports);
-        return bot.sendMessage(
-          chatId,
-          `Priority fee set: ${lamports || "auto"}`
-        );
-      }
-      if (text === "jito on") {
-        setUseJitoBundle(true);
-        return bot.sendMessage(chatId, "Jito bundling: ON");
-      }
-      if (text === "jito off") {
-        setUseJitoBundle(false);
-        return bot.sendMessage(chatId, "Jito bundling: OFF");
-      }
-
-      if (text.startsWith("stoploss ")) {
-        const parts = text.split(/\s+/);
-        if (parts[1] === "off") {
-          const mint = parts[2];
-          stopStopLoss(chatId, mint);
-          return bot.sendMessage(chatId, `Stop-loss disabled for ${mint}`);
-        }
-        const mint = parts[1];
-        const pct = Number(parts[2] || 20);
-        startStopLoss(chatId, {
-          mint,
-          thresholdPct: pct,
-          onEvent: (m) => bot.sendMessage(chatId, m),
-        });
-        return bot.sendMessage(chatId, `Stop-loss set at -${pct}% for ${mint}`);
-      }
-
-      if (text === "pump listen on") {
-        await startPumpFunListener(chatId, {
-          onMint: async (mint) => {
-            try {
-              const state = getUserState(chatId);
-              const defaultSnipe = state.defaultSnipeSol ?? 0.05;
-              const priorityFeeLamports =
-                state.maxSnipeGasPrice ?? getPriorityFeeLamports();
-              const useJitoBundle =
-                state.enableJitoForSnipes ?? getUseJitoBundle();
-              const pollInterval = state.snipePollInterval;
-              const slippageBps = state.snipeSlippage;
-              const retryCount = state.snipeRetryCount;
-
-              if (state.autoSnipeOnPaste && (await hasUserWallet(chatId))) {
-                startLiquidityWatch(chatId, {
-                  mint,
-                  amountSol: defaultSnipe,
-                  priorityFeeLamports,
-                  useJitoBundle,
-                  pollInterval,
-                  slippageBps,
-                  retryCount,
-                  onEvent: (m) => bot.sendMessage(chatId, m),
-                });
-                await bot.sendMessage(
-                  chatId,
-                  `Pump.fun mint detected: ${mint}\nAuto-snipe started for ${defaultSnipe} SOL`
-                );
-              } else {
-                const kb = {
-                  inline_keyboard: [
-                    [
-                      {
-                        text: `📈 Quote ${defaultSnipe} SOL`,
-                        callback_data: `AUTO_QUOTE_${mint}_${defaultSnipe}`,
-                      },
-                      {
-                        text: `⚡ Buy ${defaultSnipe} SOL`,
-                        callback_data: `AUTO_BUY_${mint}_${defaultSnipe}`,
-                      },
-                    ],
-                    [
-                      {
-                        text: `🎯 Snipe on LP ${defaultSnipe} SOL`,
-                        callback_data: `AUTO_SNIPE_${mint}_${defaultSnipe}`,
-                      },
-                      {
-                        text: "❌ Dismiss",
-                        callback_data: `DISMISS_${Date.now()}`,
-                      },
-                    ],
-                  ],
-                };
-                await bot.sendMessage(
-                  chatId,
-                  `Pump.fun mint detected: ${mint}\nChoose an action:`,
-                  { reply_markup: kb }
-                );
-              }
-            } catch (e) {
-              await bot.sendMessage(chatId, `Pump.fun mint detected: ${mint}`);
-            }
-          },
-        });
-        return bot.sendMessage(chatId, "Pump.fun listener ON");
-      }
-      if (text === "pump listen off") {
-        stopPumpFunListener(chatId);
-        return bot.sendMessage(chatId, "Pump.fun listener OFF");
-      }
-
-      if (text.startsWith("devwatch add ")) {
-        const addr = text.split(/\s+/)[2];
-        await addDevWalletToMonitor(chatId, addr);
-        return bot.sendMessage(chatId, `Added dev wallet: ${addr}`);
-      }
-      if (text === "devwatch start") {
-        await startDevWalletMonitor(chatId, {
-          onTx: (addr, s) =>
-            bot.sendMessage(chatId, `Dev tx from ${addr}: ${s.signature}`),
-        });
-        return bot.sendMessage(chatId, "Dev wallet monitor started");
-      }
-      if (text === "devwatch stop") {
-        stopDevWalletMonitor(chatId);
-        return bot.sendMessage(chatId, "Dev wallet monitor stopped");
-      }
-
-      if (text.startsWith("mempool watch ")) {
-        const ids = text.split(/\s+/).slice(2);
-        await startMempoolWatch(chatId, {
-          programIds: ids,
-          onEvent: (e) =>
-            bot.sendMessage(
-              chatId,
-              `Logs from ${e.programId} at slot ${e.logs.slot}`
-            ),
-        });
-        return bot.sendMessage(
-          chatId,
-          `Mempool watch on ${ids.length} programs`
-        );
-      }
-      if (text === "mempool stop") {
-        stopMempoolWatch(chatId);
-        return bot.sendMessage(chatId, "Mempool watch stopped");
-      }
-
       if (text.startsWith("quote ")) {
         const [, mint, solStr] = text.split(/\s+/);
         const amountSol = parseFloat(solStr);
-        if (!mint || !amountSol)
+        if (!mint || !amountSol) {
           return bot.sendMessage(chatId, "Usage: quote <MINT> <amount SOL>");
-        const res = await getTokenQuote({
-          inputMint: "So11111111111111111111111111111111111111112",
-          outputMint: mint,
-          amountSol,
-        });
-        if (!res || !res.outAmountFormatted)
-          return bot.sendMessage(chatId, "Failed to fetch quote.");
-        await bot.sendMessage(
-          chatId,
-          `Out amount: ${res.outAmountFormatted} tokens at ${res.priceImpactPct}% impact`
-        );
-        return;
+        }
+        if (!canProceed(chatId, "QUOTE_EXECUTE", 1200)) {
+          return bot.sendMessage(
+            chatId,
+            "⏳ Please wait a moment before requesting another quote."
+          );
+        }
+        try {
+          const res = await getTokenQuote({
+            inputMint: "So11111111111111111111111111111111111111112",
+            outputMint: mint,
+            amountSol,
+          });
+          if (!res || res.outAmountFormatted == null) {
+            return bot.sendMessage(
+              chatId,
+              "❌ Failed to fetch quote. No route found or insufficient liquidity."
+            );
+          }
+          return bot.sendMessage(
+            chatId,
+            `Out amount: ${res.outAmountFormatted} tokens at ${res.priceImpactPct}% impact`
+          );
+        } catch (e) {
+          return bot.sendMessage(chatId, `❌ Quote failed: ${e?.message || e}`);
+        }
       }
 
       if (text.startsWith("buy ")) {
