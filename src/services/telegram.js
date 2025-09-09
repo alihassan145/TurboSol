@@ -76,6 +76,9 @@ function parseFlags(parts) {
 }
 
 let bot;
+export function getBotInstance() {
+  return bot;
+}
 
 // Per-chat action debounce to reduce bursty API calls that can cause 429s
 const lastActionAt = new Map();
@@ -432,21 +435,23 @@ export async function startTelegramBot() {
             outputMint: mint,
             amountSol,
           });
-          console.log('[DEBUG] Quote Result:', res);
-          -          console.log('[TELEGRAM] Quote Validation:', { outAmount: res?.outAmount, outAmountFormatted: res?.outAmountFormatted });
-          +          console.log('[TELEGRAM] Quote Validation:', { outAmount: res?.route?.outAmount, outAmountFormatted: res?.outAmountFormatted });
-          
+          console.log("[DEBUG] Quote Result:", res);
+          console.log("[TELEGRAM] Quote Validation:", {
+            outAmount: res?.route?.outAmount,
+            outAmountFormatted: res?.outAmountFormatted,
+          });
+
           if (!res || res.outAmountFormatted == null) {
             await bot.answerCallbackQuery(query.id, { text: "Quote failed" });
             return;
           }
-          
+
           await bot.sendMessage(
             chatId,
             `Quote for ${amountSol} SOL -> ${mint}: ${res.outAmountFormatted} tokens (impact ${res.priceImpactPct}%)`
           );
         } catch (e) {
-          console.error('Auto quote failed:', e);
+          console.error("Auto quote failed:", e);
           await bot.answerCallbackQuery(query.id, { text: "Quote error" });
           await bot.sendMessage(chatId, `❌ Quote failed: ${e?.message || e}`);
         }
@@ -486,13 +491,21 @@ export async function startTelegramBot() {
             return;
           }
         } catch {}
-        const { txid } = await performSwap({
+        const swapRes = await performSwap({
           inputMint: "So11111111111111111111111111111111111111112",
           outputMint: mint,
           amountSol,
           chatId,
         });
-        await bot.sendMessage(chatId, `Buy sent. Tx: ${txid}`);
+        const txid = swapRes?.txid;
+        const solscan = `https://solscan.io/tx/${txid}`;
+        const tokOut = typeof swapRes?.output?.tokensOut === "number" ? swapRes.output.tokensOut.toFixed(4) : "?";
+        const impact = swapRes?.route?.priceImpactPct != null ? `${swapRes.route.priceImpactPct}%` : "?";
+        const symbol = swapRes?.output?.symbol || "TOKEN";
+        await bot.sendMessage(
+          chatId,
+          `✅ Buy sent\n• Token: ${symbol} (${mint})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${swapRes?.route?.labels || "route"}\n• Price impact: ${impact}\n• Slippage: ${swapRes?.slippageBps} bps\n• Priority fee: ${swapRes?.priorityFeeLamports}\n• Via: ${swapRes?.via}\n• Latency: ${swapRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`
+        );
         return;
       }
 
@@ -944,22 +957,17 @@ export async function startTelegramBot() {
   bot.on("message", async (msg) => {
     const text = msg.text;
     const chatId = msg.chat.id;
-
-    if (!text || text.startsWith("/")) return; // Skip commands and non-text
+    if (!text || text.startsWith("/")) return;
 
     try {
       const state = getUserState(chatId);
 
-      // Handle pending inputs first
       if (state.pendingInput?.type === "IMPORT_WALLET") {
         try {
           const pub = await importUserWallet(chatId, text.trim());
-          await bot.sendMessage(
-            chatId,
-            `Wallet imported: ${shortenAddress(pub)}`
-          );
+          await bot.sendMessage(chatId, `Wallet imported: ${shortenAddress(pub)}`);
         } catch (e) {
-          await bot.sendMessage(chatId, `Import failed: ${e.message || e}`);
+          await bot.sendMessage(chatId, `Import failed: ${e?.message || e}`);
         }
         setPendingInput(chatId, null);
         return;
@@ -969,427 +977,117 @@ export async function startTelegramBot() {
         try {
           const { walletId } = state.pendingInput;
           await renameUserWallet(chatId, walletId, text.slice(0, 24));
-          await bot.sendMessage(
-            chatId,
-            `Wallet renamed to: ${text.slice(0, 24)}`
-          );
+          await bot.sendMessage(chatId, `Wallet renamed to: ${text.slice(0, 24)}`);
         } catch (e) {
-          await bot.sendMessage(chatId, `Rename failed: ${e.message || e}`);
+          await bot.sendMessage(chatId, `Rename failed: ${e?.message || e}`);
         }
         setPendingInput(chatId, null);
         return;
       }
 
-      // Handle Quick Buy token input
       if (state.pendingInput?.type === "QUICK_BUY_TOKEN") {
         try {
           const normalizedMint = new PublicKey(text.trim()).toBase58();
-          setPendingInput(chatId, {
-            type: "QUICK_BUY_AMOUNT",
-            tokenAddress: normalizedMint,
-          });
+          setPendingInput(chatId, { type: "QUICK_BUY_AMOUNT", tokenAddress: normalizedMint });
           const defaultBuy = state.defaultBuySol ?? 0.05;
-          await bot.sendMessage(
-            chatId,
-            `💰 Quick Buy - ${normalizedMint}\n\nPlease enter the amount in SOL you want to buy (default: ${defaultBuy} SOL):`
-          );
+          await bot.sendMessage(chatId, `💰 Quick Buy - ${normalizedMint}\n\nPlease enter the amount in SOL you want to buy (default: ${defaultBuy} SOL):`);
         } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            "❌ Invalid token address. Please send a valid Solana token address."
-          );
+          await bot.sendMessage(chatId, "❌ Invalid token address. Please send a valid Solana token address.");
         }
         return;
       }
 
-      // Handle Quick Buy amount input
       if (state.pendingInput?.type === "QUICK_BUY_AMOUNT") {
         try {
           const { tokenAddress } = state.pendingInput;
-          const amountSol =
-            parseFloat(text.trim()) || (state.defaultBuySol ?? 0.05);
+          const amountSol = parseFloat(text.trim()) || (state.defaultBuySol ?? 0.05);
           if (amountSol <= 0) {
-            await bot.sendMessage(
-              chatId,
-              "❌ Invalid amount. Please enter a positive number."
-            );
+            await bot.sendMessage(chatId, "❌ Invalid amount. Please enter a positive number.");
             return;
           }
           if (!canProceed(chatId, "QUICK_BUY_EXECUTE", 1600)) {
-            await bot.sendMessage(
-              chatId,
-              "⏳ Please wait a moment before sending another buy."
-            );
+            await bot.sendMessage(chatId, "⏳ Please wait a moment before sending another buy.");
             return;
           }
-          // Explicit wallet pre-check
           if (!(await hasUserWallet(chatId))) {
-            await bot.sendMessage(
-              chatId,
-              "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet."
-            );
+            await bot.sendMessage(chatId, "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet.");
             return;
           }
-          // Risk check
           try {
-            const requireLpLock =
-              String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() ===
-                "true" || process.env.REQUIRE_LP_LOCK === "1";
+            const requireLpLock = String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() === "true" || process.env.REQUIRE_LP_LOCK === "1";
             const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
-            const risk = await riskCheckToken(tokenAddress, {
-              requireLpLock,
-              maxBuyTaxBps,
-            });
+            const risk = await riskCheckToken(tokenAddress, { requireLpLock, maxBuyTaxBps });
             if (!risk.ok) {
-              await bot.sendMessage(
-                chatId,
-                `🚫 Trade blocked: ${risk.reasons?.join("; ")}`
-              );
+              await bot.sendMessage(chatId, `🚫 Trade blocked: ${risk.reasons?.join("; ")}`);
               return;
             }
           } catch {}
 
-          // Immediate feedback so user knows we're proceeding
-          console.log('[TELEGRAM] Quick Buy executing', { tokenAddress, amountSol });
-          await bot.sendMessage(
-            chatId,
-            `⏳ Placing buy of ${amountSol} SOL for token ${tokenAddress}...`
-          );
+          console.log("[TELEGRAM] Quick Buy executing", { tokenAddress, amountSol });
+          await bot.sendMessage(chatId, `⏳ Placing buy of ${amountSol} SOL for token ${tokenAddress}...`);
 
-          const { txid } = await performSwap({
+          const SWAP_TIMEOUT_MS = Number(process.env.SWAP_TIMEOUT_MS || 15000);
+          function promiseWithTimeout(promise, ms, tag = "swap_timeout") {
+            let to;
+            return Promise.race([
+              promise.finally(() => clearTimeout(to)),
+              new Promise((_, rej) => { to = setTimeout(() => rej(new Error(tag)), ms); }),
+            ]);
+          }
+
+          const swapPromise = performSwap({
             inputMint: "So11111111111111111111111111111111111111112",
             outputMint: tokenAddress,
             amountSol,
             chatId,
           });
-          await bot.sendMessage(chatId, `Buy sent. Tx: ${txid}`);
-        } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            `❌ Quick Buy failed: ${e?.message || e}`
-          );
+
+          try {
+            const swapRes = await promiseWithTimeout(swapPromise, SWAP_TIMEOUT_MS);
+            const txid = swapRes?.txid || (Array.isArray(swapRes?.txids) ? swapRes.txids[0] : null);
+            if (!txid) throw new Error("Swap succeeded but no txid returned");
+            const solscan = `https://solscan.io/tx/${txid}`;
+            const symbol = swapRes?.output?.symbol || "TOKEN";
+            const tokOut = typeof swapRes?.output?.tokensOut === "number" ? swapRes.output.tokensOut.toFixed(4) : "?";
+            const impact = swapRes?.route?.priceImpactPct != null ? `${swapRes.route.priceImpactPct}%` : "?";
+            await bot.sendMessage(chatId, `✅ Buy sent\n• Token: ${symbol} (${tokenAddress})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${swapRes?.route?.labels || "route"}\n• Price impact: ${impact}\n• Slippage: ${swapRes?.slippageBps} bps\n• Priority fee: ${swapRes?.priorityFeeLamports}\n• Via: ${swapRes?.via}\n• Latency: ${swapRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`);
+          } catch (e) {
+            if (String(e?.message || "").includes("swap_timeout")) {
+              await bot.sendMessage(chatId, "⏱️ The buy is taking longer than expected due to network congestion. It may still complete. Check /positions or /lasttx in a moment.");
+              swapPromise
+                .then((res) => {
+                  const txid = res?.txid || (Array.isArray(res?.txids) ? res.txids[0] : null);
+                  if (!txid) return bot.sendMessage(chatId, "⚠️ Swap finished but no transaction id was returned.");
+                  const solscan = `https://solscan.io/tx/${txid}`;
+                  const symbol = res?.output?.symbol || "TOKEN";
+                  const tokOut = typeof res?.output?.tokensOut === "number" ? res.output.tokensOut.toFixed(4) : "?";
+                  const impact = res?.route?.priceImpactPct != null ? `${res.route.priceImpactPct}%` : "?";
+                  return bot.sendMessage(chatId, `✅ Buy completed\n• Token: ${symbol} (${tokenAddress})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${res?.route?.labels || "route"}\n• Price impact: ${impact}\n• Slippage: ${res?.slippageBps} bps\n• Priority fee: ${res?.priorityFeeLamports}\n• Via: ${res?.via}\n• Latency: ${res?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`);
+                })
+                .catch((err) => bot.sendMessage(chatId, `❌ Buy failed after timeout: ${err?.message || err}`));
+
+              const FINAL_TIMEOUT_MS = Number(process.env.SWAP_FINAL_TIMEOUT_MS || 120000);
+              promiseWithTimeout(swapPromise, FINAL_TIMEOUT_MS, "swap_final_timeout")
+                .catch((err2) => {
+                  if (String(err2?.message || "").includes("swap_final_timeout")) {
+                    bot.sendMessage(chatId, "⌛ Still no confirmation after 120s. The transaction may still land. Check /positions or /lasttx shortly. If you see a txid above, you can also track it on Solscan.");
+                  }
+                });
+            } else {
+              await bot.sendMessage(chatId, `❌ Quick Buy failed: ${e?.message || e}`);
+            }
+          }
+
+        } catch (err) {
+          await bot.sendMessage(chatId, `❌ Quick Buy error: ${err?.message || err}`);
         }
         setPendingInput(chatId, null);
         return;
       }
 
-      // Handle Snipe LP token input
-      if (state.pendingInput?.type === "SNIPE_LP_TOKEN") {
-        try {
-          const normalizedMint = new PublicKey(text.trim()).toBase58();
-          setPendingInput(chatId, {
-            type: "SNIPE_LP_AMOUNT",
-            tokenAddress: normalizedMint,
-          });
-          const defaultSnipe = state.defaultSnipeSol ?? 0.05;
-          await bot.sendMessage(
-            chatId,
-            `🎯 Snipe LP - ${normalizedMint}\n\nPlease enter the amount in SOL you want to snipe (default: ${defaultSnipe} SOL):`
-          );
-        } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            "❌ Invalid token address. Please send a valid Solana token address."
-          );
-        }
-        return;
-      }
-
-      // Handle Snipe LP amount input
-      if (state.pendingInput?.type === "SNIPE_LP_AMOUNT") {
-        try {
-          const { tokenAddress } = state.pendingInput;
-          const amountSol =
-            parseFloat(text.trim()) || (state.defaultSnipeSol ?? 0.05);
-          if (amountSol <= 0) {
-            await bot.sendMessage(
-              chatId,
-              "❌ Invalid amount. Please enter a positive number."
-            );
-            return;
-          }
-          const s = getUserState(chatId);
-          const priorityFeeLamports =
-            s.maxSnipeGasPrice ?? getPriorityFeeLamports();
-          const useJitoBundle = s.enableJitoForSnipes ?? getUseJitoBundle();
-          const pollInterval = s.snipePollInterval;
-          const slippageBps = s.snipeSlippage;
-          const retryCount = s.snipeRetryCount;
-          startLiquidityWatch(chatId, {
-            mint: tokenAddress,
-            amountSol,
-            priorityFeeLamports,
-            useJitoBundle,
-            pollInterval,
-            slippageBps,
-            retryCount,
-            onEvent: (m) => bot.sendMessage(chatId, m),
-          });
-          await bot.sendMessage(
-            chatId,
-            `🎯 Snipe started!\nToken: ${tokenAddress}\nAmount: ${amountSol} SOL\nWatching for liquidity addition...`
-          );
-        } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            `❌ Snipe setup failed: ${e?.message || e}`
-          );
-        }
-        setPendingInput(chatId, null);
-        return;
-      }
-
-      // Handle Quote token input
-      if (state.pendingInput?.type === "QUOTE_TOKEN") {
-        try {
-          const normalizedMint = new PublicKey(text.trim()).toBase58();
-          setPendingInput(chatId, {
-            type: "QUOTE_AMOUNT",
-            tokenAddress: normalizedMint,
-          });
-          const defaultBuy = state.defaultBuySol ?? 0.05;
-          await bot.sendMessage(
-            chatId,
-            `💰 Quote - ${normalizedMint}\n\nPlease enter the amount in SOL for the quote (default: ${defaultBuy} SOL):`
-          );
-        } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            "❌ Invalid token address. Please send a valid Solana token address."
-          );
-        }
-        return;
-      }
-
-      // Handle Quote amount input
-      if (state.pendingInput?.type === "QUOTE_AMOUNT") {
-        try {
-          const { tokenAddress } = state.pendingInput;
-          const amountSol =
-            parseFloat(text.trim()) || (state.defaultBuySol ?? 0.05);
-          if (amountSol <= 0) {
-            await bot.sendMessage(
-              chatId,
-              "❌ Invalid amount. Please enter a positive number."
-            );
-            return;
-          }
-          if (!canProceed(chatId, "QUOTE_EXECUTE", 1200)) {
-            await bot.sendMessage(
-              chatId,
-              "⏳ Please wait a moment before requesting another quote."
-            );
-            return;
-          }
-          const res = await getTokenQuote({
-            inputMint: "So11111111111111111111111111111111111111112",
-            outputMint: tokenAddress,
-            amountSol,
-          });
-          console.log('[DEBUG] Quote Result:', res);
-          console.log('[TELEGRAM] Quote Validation:', { outAmount: res?.outAmount, outAmountFormatted: res?.outAmountFormatted });
-if (!res || res.outAmountFormatted == null) {
-            await bot.sendMessage(
-              chatId,
-              "❌ Failed to fetch quote. No route found or insufficient liquidity."
-            );
-          } else {
-            await bot.sendMessage(
-              chatId,
-              `💰 Quote Result\n\nToken: ${tokenAddress}\nInput: ${amountSol} SOL\nOutput: ${res.outAmountFormatted} tokens\nPrice Impact: ${res.priceImpactPct}%`
-            );
-          }
-        } catch (e) {
-          await bot.sendMessage(chatId, `❌ Quote failed: ${e?.message || e}`);
-        }
-        setPendingInput(chatId, null);
-        return;
-      }
-
-      if (text.startsWith("quote ")) {
-        const [, mint, solStr] = text.split(/\s+/);
-        const amountSol = parseFloat(solStr);
-        if (!mint || !amountSol) {
-          return bot.sendMessage(chatId, "Usage: quote <MINT> <amount SOL>");
-        }
-        if (!canProceed(chatId, "QUOTE_EXECUTE", 1200)) {
-          return bot.sendMessage(
-            chatId,
-            "⏳ Please wait a moment before requesting another quote."
-          );
-        }
-        try {
-          const res = await getTokenQuote({
-            inputMint: "So11111111111111111111111111111111111111112",
-            outputMint: mint,
-            amountSol,
-          });
-          if (!res || res.outAmountFormatted == null) {
-            return bot.sendMessage(
-              chatId,
-              "❌ Failed to fetch quote. No route found or insufficient liquidity."
-            );
-          }
-          return bot.sendMessage(
-            chatId,
-            `Out amount: ${res.outAmountFormatted} tokens at ${res.priceImpactPct}% impact`
-          );
-        } catch (e) {
-          return bot.sendMessage(chatId, `❌ Quote failed: ${e?.message || e}`);
-        }
-      }
-
-      if (text.startsWith("buy ")) {
-        const [, mint, solStr, ...flagParts] = text.split(/\s+/);
-        const amountSol = parseFloat(solStr);
-        if (!mint || !amountSol)
-          return bot.sendMessage(chatId, "Usage: buy <MINT> <amount SOL>");
-        // Explicit wallet pre-check
-        if (!(await hasUserWallet(chatId))) {
-          return bot.sendMessage(
-            chatId,
-            "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet."
-          );
-        }
-        // Optional risk check gate
-        try {
-          const requireLpLock =
-            String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() ===
-              "true" || process.env.REQUIRE_LP_LOCK === "1";
-          const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
-          const risk = await riskCheckToken(mint, {
-            requireLpLock,
-            maxBuyTaxBps,
-          });
-          if (!risk.ok) {
-            return bot.sendMessage(
-              chatId,
-              `🚫 Trade blocked: ${risk.reasons?.join("; ")}`
-            );
-          }
-        } catch {}
-        const flags = parseFlags(flagParts);
-        const result = await performSwap({
-          inputMint: "So11111111111111111111111111111111111111112",
-          outputMint: mint,
-          amountSol,
-          chatId,
-          ...flags,
-        });
-        if (result?.txids && result.txids.length) {
-          return bot.sendMessage(
-            chatId,
-            `Swap submitted across ${
-              result.txids.length
-            } wallet(s). Tx(s):\n${result.txids.join("\n")}`
-          );
-        }
-        if (result?.txid) {
-          return bot.sendMessage(chatId, `Swap submitted. Tx: ${result.txid}`);
-        }
-        return bot.sendMessage(chatId, "Swap failed.");
-      }
-
-      if (text.startsWith("snipe ")) {
-        const [, mint, solStr] = text.split(/\s+/);
-        const amountSol = parseFloat(solStr);
-        if (!mint || !amountSol)
-          return bot.sendMessage(chatId, "Usage: snipe <MINT> <amount SOL>");
-        // Explicit wallet pre-check
-        if (!(await hasUserWallet(chatId))) {
-          return bot.sendMessage(
-            chatId,
-            "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet."
-          );
-        }
-        const priorityFeeLamports = getPriorityFeeLamports();
-        const useJitoBundle = getUseJitoBundle();
-        startLiquidityWatch(chatId, {
-          mint,
-          amountSol,
-          priorityFeeLamports,
-          useJitoBundle,
-          onEvent: (m) => bot.sendMessage(chatId, m),
-        });
-        return bot.sendMessage(
-          chatId,
-          `Sniping will start when liquidity is added for ${mint}`
-        );
-      }
-
-      // Auto-detect Solana mint or account addresses and propose actions
-      // Basic heuristic: Base58 32-44 chars and not starting with a slash command
-      const base58Re = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-      if (!text.startsWith("/") && base58Re.test(text)) {
-        let normalizedMint = null;
-        try {
-          normalizedMint = new PublicKey(text).toBase58();
-        } catch {}
-        if (normalizedMint) {
-          const mint = normalizedMint;
-          const defaultBuy = state.defaultBuySol ?? 0.05;
-          const defaultSnipe = state.defaultSnipeSol ?? 0.05;
-          if (state.autoSnipeOnPaste && (await hasUserWallet(chatId))) {
-            const s = getUserState(chatId);
-            const priorityFeeLamports =
-              s.maxSnipeGasPrice ?? getPriorityFeeLamports();
-            const useJitoBundle = s.enableJitoForSnipes ?? getUseJitoBundle();
-            const pollInterval = s.snipePollInterval;
-            const slippageBps = s.snipeSlippage;
-            const retryCount = s.snipeRetryCount;
-            startLiquidityWatch(chatId, {
-              mint,
-              amountSol: defaultSnipe,
-              priorityFeeLamports,
-              useJitoBundle,
-              pollInterval,
-              slippageBps,
-              retryCount,
-              onEvent: (m) => bot.sendMessage(chatId, m),
-            });
-            await bot.sendMessage(
-              chatId,
-              `Auto-snipe started for ${mint} — amount ${defaultSnipe} SOL`
-            );
-            return;
-          }
-          const kb = {
-            inline_keyboard: [
-              [
-                {
-                  text: `📈 Quote ${defaultBuy} SOL`,
-                  callback_data: `AUTO_QUOTE_${mint}_${defaultBuy}`,
-                },
-                {
-                  text: `⚡ Buy ${defaultBuy} SOL`,
-                  callback_data: `AUTO_BUY_${mint}_${defaultBuy}`,
-                },
-              ],
-              [
-                {
-                  text: `🎯 Snipe on LP ${defaultSnipe} SOL`,
-                  callback_data: `AUTO_SNIPE_${mint}_${defaultSnipe}`,
-                },
-                { text: "❌ Dismiss", callback_data: `DISMISS_${Date.now()}` },
-              ],
-            ],
-          };
-          await bot.sendMessage(
-            chatId,
-            `Detected token/mint: ${mint}\nChoose an action:`,
-            { reply_markup: kb }
-          );
-          return;
-        }
-      }
-    } catch (e) {
-      await bot.sendMessage(chatId, `Error: ${e.message || e}`);
+    } catch (outerErr) {
+      console.error("Message handler error:", outerErr);
     }
   });
 
-  console.log("Telegram bot started");
-}
-
-export function getBotInstance() {
-  return bot;
-}
+} // close startTelegramBot

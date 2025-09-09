@@ -3,10 +3,21 @@ import { Connection } from "@solana/web3.js";
 
 let latencyCache = { value: 0, timestamp: 0 };
 const CACHE_DURATION = 10000; // 10 seconds
+const RPC_PING_TIMEOUT_MS = Number(process.env.RPC_PING_TIMEOUT_MS || 1200);
+
+function promiseWithTimeout(promise, ms, tag = "timeout") {
+  let to;
+  return Promise.race([
+    promise.finally(() => clearTimeout(to)),
+    new Promise((_, rej) => {
+      to = setTimeout(() => rej(new Error(tag)), ms);
+    }),
+  ]);
+}
 
 export async function measureRpcLatency() {
   const now = Date.now();
-  
+
   // Return cached value if recent
   if (now - latencyCache.timestamp < CACHE_DURATION) {
     return latencyCache.value;
@@ -15,9 +26,13 @@ export async function measureRpcLatency() {
   try {
     const connection = getRpcConnection();
     const start = Date.now();
-    await connection.getSlot();
+    await promiseWithTimeout(
+      connection.getSlot(),
+      RPC_PING_TIMEOUT_MS,
+      "rpc_ping_timeout"
+    );
     const latency = Date.now() - start;
-    
+
     latencyCache = { value: latency, timestamp: now };
     return latency;
   } catch (error) {
@@ -36,11 +51,11 @@ export async function getRpcStatus() {
   const latency = await measureRpcLatency();
   const status = getLatencyStatus(latency);
   const latencyText = latency >= 0 ? `${latency}ms` : "Error";
-  
+
   return {
     latency,
     status,
-    display: `${status} (${latencyText})`
+    display: `${status} (${latencyText})`,
   };
 }
 
@@ -50,7 +65,11 @@ export async function measureEndpointsLatency(urls = []) {
     const started = Date.now();
     try {
       const conn = new Connection(url, "confirmed");
-      await conn.getSlot();
+      await promiseWithTimeout(
+        conn.getSlot(),
+        RPC_PING_TIMEOUT_MS,
+        "rpc_ping_timeout"
+      );
       return { url, latency: Date.now() - started };
     } catch (e) {
       // Put failing endpoints at the end

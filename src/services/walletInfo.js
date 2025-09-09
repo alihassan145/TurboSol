@@ -31,10 +31,13 @@ export async function getWalletBalance(chatId = null) {
 
 export async function getSolPriceUSD() {
   try {
+    const timeoutMs = Number(process.env.PRICE_API_TIMEOUT_MS || 1500);
     const response = await axios.get(
-      "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
+      "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+      { timeout: timeoutMs, validateStatus: (s) => s >= 200 && s < 500 }
     );
-    return response.data.solana.usd;
+    const usd = response?.data?.solana?.usd;
+    return Number.isFinite(usd) ? usd : null;
   } catch (error) {
     return null;
   }

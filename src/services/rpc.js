@@ -222,7 +222,7 @@ export async function sendTransactionRaced(
   }
   const dt = nowMs() - t0;
   const err = lastError || new Error("All RPC broadcasts failed");
-  err.meta = { source: via, sendLatencyMs: dt };
+  err.meta = { source: "rpc_race", sendLatencyMs: dt };
   throw err;
 }
 

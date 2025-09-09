@@ -120,9 +120,9 @@ export function addTradeLog(chatId, trade) {
     // Adjust snipe slippage based on observed send/confirm latency proxy
     if (avgLat != null) {
       if (avgLat > 900) {
-        state.snipeSlippage = clamp((state.snipeSlippage || 100) + 50, 50, 800);
+        state.snipeSlippage = clamp((state.snipeSlippage || 100) + 50, 50, 1000);
       } else if (avgLat < 350) {
-        state.snipeSlippage = clamp((state.snipeSlippage || 100) - 25, 50, 800);
+        state.snipeSlippage = clamp((state.snipeSlippage || 100) - 25, 50, 1000);
       }
       // Adjust gas price ceiling
       const curMax = Number(state.maxSnipeGasPrice || 200000);

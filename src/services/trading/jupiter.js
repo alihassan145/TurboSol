@@ -25,10 +25,18 @@ const SOL_MINT = "So11111111111111111111111111111111111111112";
 const JUP_DEBUG =
   String(process.env.JUP_DEBUG || "").toLowerCase() === "true" ||
   process.env.JUP_DEBUG === "1";
+// Time budgets tuned for quick-buy responsiveness
+const JUP_QUOTE_TIMEOUT_MS = Number(process.env.JUP_QUOTE_TIMEOUT_MS || 1500);
+const JUP_SWAP_TIMEOUT_MS = Number(process.env.JUP_SWAP_TIMEOUT_MS || 2500);
+const JUP_HTTP_RETRIES = Number(process.env.JUP_HTTP_RETRIES || 3);
+const JUP_HTTP_BASE_DELAY_MS = Number(
+  process.env.JUP_HTTP_BASE_DELAY_MS || 300
+);
+const JUP_HTTP_MAX_DELAY_MS = Number(process.env.JUP_HTTP_MAX_DELAY_MS || 2500);
 
 // Retry helpers to mitigate 429s and transient errors from Jupiter
 function sleep(ms) {
-  return new Promise((res) => setTimeout(res, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function isRetryableError(err) {
   const status = err?.response?.status;
@@ -78,6 +86,26 @@ function parseRetryAfterMs(err) {
   const ts = Date.parse(ra);
   if (Number.isFinite(ts)) return Math.max(0, ts - Date.now());
   return null;
+}
+
+/* Removed duplicate QUOTE_CACHE/httpGetWithRetry/httpPostWithRetry/fetchDexTokenInfo/toLamports block */
+
+// Small utility to cap long-running awaits in pre-quote phase
+async function withTimeout(promise, ms, label = "op") {
+  let to;
+  const t0 = Date.now();
+  return Promise.race([
+    promise.finally(() => clearTimeout(to)),
+    new Promise((_, rej) => {
+      to = setTimeout(
+        () => rej(new Error(`${label} timed out after ${ms}ms`)),
+        ms
+      );
+    }),
+  ]).finally(() => {
+    const dt = Date.now() - t0;
+    if (JUP_DEBUG) console.log(`[withTimeout] ${label} finished in ${dt}ms`);
+  });
 }
 
 // Short-lived cache and in-flight deduplication for identical quote URLs
@@ -280,12 +308,19 @@ export async function getTokenQuote({
   const slippage =
     slippageBps ?? Number(process.env.DEFAULT_SLIPPAGE_BPS || 100);
   const url = `${JUP_BASE}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippage}`;
-  const { data } = await httpGetWithRetry(url);
-  console.log('[JUPITER] Raw API Response:', JSON.stringify(data, null, 2));
-  console.log('[JUPITER] Response Validation:', {
+  if (JUP_DEBUG) console.log("[IMPACT] Quote URL", url);
+  const { data } = await httpGetWithRetry(
+    url,
+    { timeout: JUP_QUOTE_TIMEOUT_MS },
+    JUP_HTTP_RETRIES,
+    JUP_HTTP_BASE_DELAY_MS,
+    JUP_HTTP_MAX_DELAY_MS
+  );
+  console.log("[JUPITER] Raw API Response:", JSON.stringify(data, null, 2));
+  console.log("[JUPITER] Response Validation:", {
     hasOutAmount: !!data.outAmount,
     hasFormatted: !!data.outAmountFormatted,
-    routeExists: data.routePlan?.length > 0
+    routeExists: data.routePlan?.length > 0,
   });
 
   const route = data;
@@ -321,8 +356,9 @@ export async function performSwap({
   outputMint,
   amountSol,
   slippageBps,
+  // priorityFeeLamports,
   priorityFeeLamports,
-  useJitoBundle = false,
+  useJitoBundle = true,
   usePrivateRelay, // optional override
   splitAcrossWallets = false,
   walletsCount, // optional desired wallet count for split
@@ -331,30 +367,55 @@ export async function performSwap({
   adaptiveSizingByLiquidity, // optional override
   adaptiveSplit, // optional override
 }) {
-  // Enforce user wallet context and disallow admin fallback
-  if (chatId == null)
-    throw new Error("Trading requires user wallet context (chatId)");
-  if (!(await hasUserWallet(chatId))) {
-    throw new Error(
-      "User wallet not found. Use /setup to create or /import to add one."
-    );
-  }
+  console.log("[BUY] performSwap start", {
+    chatId,
+    inputMint,
+    outputMint,
+    amountSol,
+    slippageBps,
+    priorityFeeLamports,
+    useJitoBundle,
+    usePrivateRelay,
+    splitAcrossWallets,
+    walletsCount,
+  });
   const connection = await getUserConnectionInstance(chatId);
   const wallet = await getUserWalletInstance(chatId);
 
   // Auto-determine competitive priority fee when not supplied
   if (priorityFeeLamports == null) {
     try {
-      priorityFeeLamports = await getAdaptivePriorityFee(connection);
-    } catch {}
+      priorityFeeLamports = await withTimeout(
+        getAdaptivePriorityFee(connection),
+        1200,
+        "priorityFee"
+      );
+    } catch (e) {
+      if (JUP_DEBUG)
+        console.log("[BUY] priority fee auto-detect skipped:", e?.message);
+    }
   }
+  // Fallback to env-configured default and ensure numeric type
+  if (priorityFeeLamports == null) {
+    priorityFeeLamports = Number(
+      process.env.DEFAULT_PRIORITY_FEE_LAMPORTS || 3000000
+    );
+  } else if (typeof priorityFeeLamports === "string") {
+    priorityFeeLamports = Number(priorityFeeLamports);
+  }
+
   // Determine adaptive slippage
   let slippage;
   if (slippageBps != null) {
     slippage = slippageBps;
   } else {
-    slippage = await getAdaptiveSlippageBps();
+    try {
+      slippage = await withTimeout(getAdaptiveSlippageBps(), 1200, "slippage");
+    } catch {
+      slippage = Number(process.env.DEFAULT_SLIPPAGE_BPS || 100);
+    }
   }
+  console.log("[BUY] pre-risk params", { slippage, priorityFeeLamports });
 
   // Optional risk checks before building swap
   if (!riskBypass) {
@@ -362,9 +423,20 @@ export async function performSwap({
       String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() === "true" ||
       process.env.REQUIRE_LP_LOCK === "1";
     const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
+    console.log("[BUY] riskCheckToken start", {
+      outputMint,
+      requireLpLock,
+      maxBuyTaxBps,
+    });
+    const tRisk0 = Date.now();
     const risk = await riskCheckToken(outputMint, {
       requireLpLock,
       maxBuyTaxBps,
+    });
+    console.log("[BUY] riskCheckToken end", {
+      ok: risk.ok,
+      ms: Date.now() - tRisk0,
+      reasons: risk.reasons,
     });
     if (!risk.ok) {
       throw new Error(
@@ -394,6 +466,7 @@ export async function performSwap({
   }
 
   // Adaptive sizing by liquidity and adaptive split (optional)
+
   try {
     const enableSizing =
       adaptiveSizingByLiquidity != null
@@ -405,10 +478,27 @@ export async function performSwap({
         ? !!adaptiveSplit
         : String(process.env.ADAPTIVE_SPLIT || "").toLowerCase() === "true" ||
           process.env.ADAPTIVE_SPLIT === "1";
+    console.log("[BUY] adaptive flags", { enableSizing, enableSplit });
     if (enableSizing || enableSplit) {
-      const dex = await fetchDexTokenInfo(outputMint).catch(() => null);
+      const tDex0 = Date.now();
+      const dex = await withTimeout(
+        fetchDexTokenInfo(outputMint),
+        1500,
+        "dexInfo"
+      ).catch(() => null);
+      console.log("[BUY] dex info", {
+        ok: !!dex,
+        ms: Date.now() - tDex0,
+        liqUsd: dex?.liquidityUsd,
+        priceUsd: dex?.priceUsd,
+      });
+
       if (dex && Number(dex.liquidityUsd) > 0) {
-        const solPrice = await getSolPriceUSD().catch(() => undefined);
+        const solPrice = await withTimeout(
+          getSolPriceUSD(),
+          1200,
+          "solPrice"
+        ).catch(() => undefined);
         const originalAmountSol = Number(amountSol);
         if (enableSizing && solPrice && solPrice > 0) {
           const liqUsd = Number(dex.liquidityUsd);
@@ -547,6 +637,8 @@ export async function performSwap({
       const perWalletMeta = [];
       for (const w of selected) {
         const qUrl = `${JUP_BASE}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${perLamports}&slippageBps=${slippage}`;
+        console.log(qUrl);
+
         const qRes = await httpGetWithRetry(qUrl);
         const route = qRes?.data;
         if (!route) throw new Error("No route for split");
@@ -564,7 +656,9 @@ export async function performSwap({
         tx.sign([w.keypair]);
         signedTxs.push(tx);
         signedBase64.push(serializeToBase64(tx));
-        const decOut = route?.outToken?.decimals ?? (await getMintDecimalsCached(outputMint));
+        const decOut =
+          route?.outToken?.decimals ??
+          (await getMintDecimalsCached(outputMint));
         const tokensOut =
           route?.outAmount && decOut != null
             ? Number(route.outAmount) / 10 ** Number(decOut)
@@ -576,6 +670,15 @@ export async function performSwap({
         const resp = await submitBundleWithTarget(signedBase64);
         const latencyMs = Date.now() - t0;
         const bundleUuid = resp?.uuid || "bundle_submitted";
+        console.log("[BUY][JITO][SPLIT] Submitted bundle", {
+          chatId,
+          wallets: selected.length,
+          perWalletSol,
+          slippage,
+          priorityFeeLamports,
+          bundleUuid,
+          latencyMs,
+        });
         const slot = await connection.getSlot().catch(() => undefined);
         try {
           for (const m of perWalletMeta) {
@@ -612,6 +715,16 @@ export async function performSwap({
           const tx = signedTxs[i];
           try {
             const tSend0 = Date.now();
+            const wmeta = perWalletMeta[i];
+            console.log("[BUY][RPC][SPLIT] Sending tx", {
+              chatId,
+              idx: i,
+              wallet: wmeta?.w?.keypair?.publicKey?.toBase58?.(),
+              perWalletSol,
+              slippage,
+              priorityFeeLamports,
+              privateRelay: shouldUsePrivateRelay,
+            });
             let txid;
             try {
               txid = await sendTransactionRaced(tx, {
@@ -626,6 +739,7 @@ export async function performSwap({
             }
             const latencyMs = Date.now() - tSend0;
             results.push(txid);
+            console.log("[BUY][RPC][SPLIT] Sent", { idx: i, txid, latencyMs });
             try {
               addTradeLog(chatId, {
                 kind: "buy",
@@ -648,16 +762,31 @@ export async function performSwap({
     for (const w of selected) {
       try {
         const qUrl = `${JUP_BASE}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${perLamports}&slippageBps=${slippage}`;
-        const qRes = await httpGetWithRetry(qUrl);
+        console.log("[BUY][SPLIT][JITO] Quote URL", qUrl);
+
+        const qRes = await httpGetWithRetry(
+          qUrl,
+          { timeout: JUP_QUOTE_TIMEOUT_MS },
+          JUP_HTTP_RETRIES,
+          JUP_HTTP_BASE_DELAY_MS,
+          JUP_HTTP_MAX_DELAY_MS
+        );
         const route = qRes?.data;
         if (!route) throw new Error("No route for split");
-        const swapRes = await httpPostWithRetry(`${JUP_BASE}/v6/swap`, {
-          quoteResponse: route,
-          userPublicKey: w.keypair.publicKey.toBase58(),
-          wrapAndUnwrapSol: true,
-          dynamicComputeUnitLimit: true,
-          prioritizationFeeLamports: priorityFeeLamports ?? "auto",
-        });
+        const swapRes = await httpPostWithRetry(
+          `${JUP_BASE}/v6/swap`,
+          {
+            quoteResponse: route,
+            userPublicKey: w.keypair.publicKey.toBase58(),
+            wrapAndUnwrapSol: true,
+            dynamicComputeUnitLimit: true,
+            prioritizationFeeLamports: priorityFeeLamports ?? "auto",
+          },
+          { timeout: JUP_SWAP_TIMEOUT_MS },
+          JUP_HTTP_RETRIES,
+          JUP_HTTP_BASE_DELAY_MS,
+          JUP_HTTP_MAX_DELAY_MS
+        );
         const swapTx = swapRes?.data?.swapTransaction;
         if (!swapTx) throw new Error("No swap transaction returned");
         const tx = VersionedTransaction.deserialize(
@@ -665,6 +794,15 @@ export async function performSwap({
         );
         tx.sign([w.keypair]);
         let txid;
+        const tSend0 = Date.now();
+        console.log("[BUY][RPC][SPLIT] Sending tx", {
+          chatId,
+          wallet: w.keypair.publicKey.toBase58(),
+          perWalletSol,
+          slippage,
+          priorityFeeLamports,
+          privateRelay: shouldUsePrivateRelay,
+        });
         try {
           txid = await sendTransactionRaced(tx, {
             skipPreflight: true,
@@ -676,6 +814,12 @@ export async function performSwap({
             skipPreflight: true,
           });
         }
+        const latencyMs = Date.now() - tSend0;
+        console.log("[BUY][RPC][SPLIT] Sent", {
+          wallet: w.keypair.publicKey.toBase58(),
+          txid,
+          latencyMs,
+        });
         results.push(txid);
         try {
           addTradeLog(chatId, {
@@ -686,6 +830,7 @@ export async function performSwap({
           });
         } catch {}
       } catch (e) {
+        console.log("[BUY][SPLIT] wallet send error", e?.message);
         // continue
       }
     }
@@ -693,18 +838,33 @@ export async function performSwap({
   }
 
   // Single-wallet flow
+  console.log("[BUY] path=single");
   const amount = toLamports(amountSol);
   const qUrl = `${JUP_BASE}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippage}`;
-  const qRes = await httpGetWithRetry(qUrl);
+  console.log("[BUY] Quote URL", qUrl);
+  const qRes = await httpGetWithRetry(
+    qUrl,
+    { timeout: JUP_QUOTE_TIMEOUT_MS },
+    JUP_HTTP_RETRIES,
+    JUP_HTTP_BASE_DELAY_MS,
+    JUP_HTTP_MAX_DELAY_MS
+  );
   const route = qRes?.data;
   if (!route) throw new Error("No route");
-  const swapRes = await httpPostWithRetry(`${JUP_BASE}/v6/swap`, {
-    quoteResponse: route,
-    userPublicKey: wallet.publicKey.toBase58(),
-    wrapAndUnwrapSol: true,
-    dynamicComputeUnitLimit: true,
-    prioritizationFeeLamports: priorityFeeLamports ?? "auto",
-  });
+  const swapRes = await httpPostWithRetry(
+    `${JUP_BASE}/v6/swap`,
+    {
+      quoteResponse: route,
+      userPublicKey: wallet.publicKey.toBase58(),
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+      prioritizationFeeLamports: priorityFeeLamports ?? "auto",
+    },
+    { timeout: JUP_SWAP_TIMEOUT_MS },
+    JUP_HTTP_RETRIES,
+    JUP_HTTP_BASE_DELAY_MS,
+    JUP_HTTP_MAX_DELAY_MS
+  );
   const swapTx = swapRes?.data?.swapTransaction;
   if (!swapTx) throw new Error("No swap transaction returned");
   const tx = VersionedTransaction.deserialize(Buffer.from(swapTx, "base64"));
@@ -713,6 +873,16 @@ export async function performSwap({
   const t0 = Date.now();
   let txid;
   let via = "rpc";
+  console.log("[BUY] Preparing to send swap transaction", {
+    chatId,
+    amountSol,
+    inputMint,
+    outputMint,
+    slippage,
+    priorityFeeLamports,
+    usePrivateRelay: shouldUsePrivateRelay,
+    useJitoBundle,
+  });
   try {
     if (useJitoBundle) {
       const base64Signed = serializeToBase64(tx);
@@ -733,6 +903,7 @@ export async function performSwap({
     });
   }
   const latencyMs = Date.now() - t0;
+  console.log("[BUY] Swap sent", { via, txid, latencyMs });
 
   try {
     const outTokens =
@@ -763,7 +934,32 @@ export async function performSwap({
     });
   } catch {}
 
-  return { txid };
+  return {
+    txid,
+    via,
+    latencyMs,
+    amountSol,
+    slippageBps: slippage,
+    priorityFeeLamports,
+    output: {
+      mint: outputMint,
+      symbol: route?.outToken?.symbol,
+      decimals: route?.outToken?.decimals,
+      tokensOut:
+        route?.outAmount && route?.outToken?.decimals != null
+          ? route.outAmount / 10 ** route?.outToken.decimals
+          : undefined,
+    },
+    route: {
+      labels:
+        route?.routePlan?.map((p) => p?.swapInfo?.label).join(">") ||
+        (route?.routePlan ? "routePlan" : "route"),
+      priceImpactPct:
+        route?.priceImpactPct != null
+          ? Math.round(route.priceImpactPct * 10000) / 100
+          : undefined,
+    },
+  };
 }
 
 // Sell helper: swap token -> SOL

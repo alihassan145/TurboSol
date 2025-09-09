@@ -110,7 +110,7 @@ export function startLiquidityWatch(
 
       // Adaptive slippage by attempts (safe and robust without trusting priceImpact schema)
       let slip = Number(slippageBps ?? 100);
-      slip = Math.min(800, slip + (attempts - 1) * 100);
+      slip = Math.min(1000, slip + (attempts - 1) * 100);
 
       // Priority fee optimizer from observed latency
       let prio = priorityFeeLamports;
