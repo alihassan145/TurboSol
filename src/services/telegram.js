@@ -962,6 +962,46 @@ export async function startTelegramBot() {
     try {
       const state = getUserState(chatId);
 
+      // Detect pasted Jupiter Quote URL and offer Quote/Buy actions directly
+      if (!state.pendingInput && /quote-api\.jup\.ag\/v6\/quote/.test(text)) {
+        try {
+          const url = new URL(text.trim());
+          const outputMint = url.searchParams.get("outputMint");
+          const amountRaw = url.searchParams.get("amount");
+          const slippageBpsQS = url.searchParams.get("slippageBps");
+          if (outputMint && amountRaw) {
+            const amountSol = Number(amountRaw) / 1e9;
+            const slippageBps = slippageBpsQS ? Number(slippageBpsQS) : undefined;
+            const res = await getTokenQuote({
+              inputMint: "So11111111111111111111111111111111111111112",
+              outputMint,
+              amountSol,
+              slippageBps,
+            });
+            const impact = res?.priceImpactPct != null ? `${res.priceImpactPct}%` : "?";
+            const out = typeof res?.outAmountFormatted === "number" ? res.outAmountFormatted : Number(res?.outAmountFormatted || 0);
+            const outStr = Number.isFinite(out) ? out.toFixed(6) : "?";
+            await bot.sendMessage(
+              chatId,
+              `Quote for ${amountSol} SOL -> ${outputMint}: ${outStr} tokens (impact ${impact})`,
+              {
+                reply_markup: {
+                  inline_keyboard: [
+                    [
+                      { text: "Buy", callback_data: `AUTO_BUY_${outputMint}_${amountSol}` },
+                      { text: "Quote", callback_data: `AUTO_QUOTE_${outputMint}_${amountSol}` },
+                    ],
+                  ],
+                },
+              }
+            );
+            return;
+          }
+        } catch (e) {
+          // ignore parsing errors and continue to other handlers
+        }
+      }
+
       if (state.pendingInput?.type === "IMPORT_WALLET") {
         try {
           const pub = await importUserWallet(chatId, text.trim());
@@ -1080,6 +1120,61 @@ export async function startTelegramBot() {
 
         } catch (err) {
           await bot.sendMessage(chatId, `❌ Quick Buy error: ${err?.message || err}`);
+        }
+        setPendingInput(chatId, null);
+        return;
+      }
+
+      // Quote flow: ask for token, then amount, then display quote
+      if (state.pendingInput?.type === "QUOTE_TOKEN") {
+        try {
+          const normalizedMint = new PublicKey(text.trim()).toBase58();
+          setPendingInput(chatId, { type: "QUOTE_AMOUNT", tokenAddress: normalizedMint });
+          const defaultBuy = state.defaultBuySol ?? 0.05;
+          await bot.sendMessage(chatId, `💰 Quote - ${normalizedMint}\n\nEnter amount in SOL to quote (default: ${defaultBuy} SOL):`);
+        } catch (e) {
+          await bot.sendMessage(chatId, "❌ Invalid token address. Please send a valid Solana token address.");
+        }
+        return;
+      }
+
+      if (state.pendingInput?.type === "QUOTE_AMOUNT") {
+        try {
+          const { tokenAddress } = state.pendingInput;
+          const amountSol = parseFloat(text.trim()) || (state.defaultBuySol ?? 0.05);
+          if (amountSol <= 0) {
+            await bot.sendMessage(chatId, "❌ Invalid amount. Please enter a positive number.");
+            return;
+          }
+          const res = await getTokenQuote({
+            inputMint: "So11111111111111111111111111111111111111112",
+            outputMint: tokenAddress,
+            amountSol,
+          });
+          if (!res) {
+            await bot.sendMessage(chatId, "❌ Quote failed: No route returned.");
+            setPendingInput(chatId, null);
+            return;
+          }
+          const impact = res?.priceImpactPct != null ? `${res.priceImpactPct}%` : "?";
+          const out = typeof res?.outAmountFormatted === "number" ? res.outAmountFormatted : Number(res?.outAmountFormatted || 0);
+          const outStr = Number.isFinite(out) ? out.toFixed(6) : "?";
+          await bot.sendMessage(
+            chatId,
+            `Quote for ${amountSol} SOL -> ${tokenAddress}: ${outStr} tokens (impact ${impact})`,
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    { text: "Buy", callback_data: `AUTO_BUY_${tokenAddress}_${amountSol}` },
+                    { text: "Re-Quote", callback_data: `AUTO_QUOTE_${tokenAddress}_${amountSol}` },
+                  ],
+                ],
+              },
+            }
+          );
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ Quote failed: ${e?.message || e}`);
         }
         setPendingInput(chatId, null);
         return;

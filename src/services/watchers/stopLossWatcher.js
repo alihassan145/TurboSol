@@ -1,6 +1,7 @@
 import { performSell } from "../trading/jupiter.js";
 import { getUserState } from "../userState.js";
 import { getQuoteRaw } from "../trading/jupiter.js";
+import { getWatchersPaused, getWatchersSlowMs } from "../config.js";
 
 const watchers = new Map();
 
@@ -32,6 +33,14 @@ export function startStopLoss(
   const loop = async () => {
     if (!running) return;
     try {
+      // Pause switch
+      if (getWatchersPaused()) {
+        onEvent?.("Watchers paused by config. Skipping stop-loss check.");
+        return;
+      }
+      const slowMs = getWatchersSlowMs();
+      if (slowMs > 0) await new Promise((r) => setTimeout(r, slowMs));
+
       // Quote ~1% of position to estimate price
       const probeTokens = Math.max(0.000001, amountTokens * 0.01);
       const baseSlippage = 150; // generous to get quotes in stress

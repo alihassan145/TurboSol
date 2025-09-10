@@ -7,6 +7,7 @@ import {
   markSnipeExecuted,
   markSnipeCancelled,
 } from "../snipeStore.js";
+import { getWatchersPaused, getWatchersSlowMs } from "../config.js";
 
 const activeWatchers = new Map();
 
@@ -54,6 +55,11 @@ export function startLiquidityWatch(
   }).catch(() => {});
 
   const checkReady = async () => {
+    // Pause switch
+    if (getWatchersPaused()) {
+      onEvent?.("Watchers paused by config. Skipping check.");
+      return false;
+    }
     // balance preflight
     const bal = await getWalletBalance(chatId);
     if ((bal?.solBalance || 0) < amountSol) {
@@ -83,6 +89,10 @@ export function startLiquidityWatch(
     try {
       const ready = await checkReady();
       if (!ready) return;
+
+      const slowMs = getWatchersSlowMs();
+      if (slowMs > 0) await new Promise((r) => setTimeout(r, slowMs));
+
       // quick readiness probe for route availability via shared Jupiter helper
       const route = await getQuoteRaw({
         inputMint: "So11111111111111111111111111111111111111112",
