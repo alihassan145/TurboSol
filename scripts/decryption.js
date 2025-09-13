@@ -3,7 +3,7 @@ import crypto from "crypto";
 
 // === Put your values here ===
 const ENCRYPTED_PRIVATE_KEY =
-  "a4b882a1527b9fd4d4b8fa9a75c3af58:73d964092b49b1263d289df7442da2b235aed0b26e2d4f795830dae7923a469cbb664a46c68f5a9226c9583c698665db29fb6079f09f7cd7b4241ab7d745ee4acf0dfde027cedc47b71749e2095ade1c46567881d4de30f360ddd5be2760e757"; // your stored encrypted key
+  "e423b641cf829a7f15d60e5e65b09654:99feb2188f5dd866c111f15b4418175ecce2458521a933ae6a42aa83196869f57b8356014e0c794d791a3c8c0283e852720f5f07d9c9230fc0df95b2dceedabda8af101f1e9dfed88a9322e43741d55f0cc9dca0da19ab7003d3ee386fd6ec38"; // your stored encrypted key
 const ENCRYPTION_KEY_HEX =
   "42b8382c153d2d7f312983a98ae1385111d763a0049d6dbd8959531971efb9a7"; // 32-byte hex string (64 chars)
 // =============================

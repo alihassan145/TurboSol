@@ -80,7 +80,7 @@ export async function submitBundleWithTarget(
   {
     slotsAhead = Number(process.env.JITO_SLOTS_AHEAD || 1),
     retries = Number(process.env.JITO_RETRIES || 2),
-    retryDelayMs = Number(process.env.JITO_RETRY_DELAY_MS || 150),
+    retryDelayMs = Number(process.env.JITO_RETRY_DELAY_MS || 100),
     maxWaitMs = Number(process.env.JITO_MAX_WAIT_MS || 1000),
   } = {}
 ) {

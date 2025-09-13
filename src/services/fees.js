@@ -8,7 +8,7 @@ import { Connection } from "@solana/web3.js";
  * @returns {Promise<number>} Recommended priority fee (lamports)
  */
 const PRIORITY_FEE_TIMEOUT_MS = Number(
-  process.env.PRIORITY_FEE_TIMEOUT_MS || 1200
+  process.env.PRIORITY_FEE_TIMEOUT_MS || 800
 );
 const PRIORITY_FEE_MULTIPLIER = Number(
   process.env.PRIORITY_FEE_MULTIPLIER || 1.5

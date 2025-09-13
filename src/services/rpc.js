@@ -4,9 +4,9 @@ import axios from "axios";
 
 // In-memory endpoint stats for scoring and backoff
 const endpointStats = new Map();
-const TIMEOUT_MS = Number(process.env.RPC_SEND_TIMEOUT_MS || 2500);
-const STAGGER_STEP_MS = Number(process.env.RPC_STAGGER_STEP_MS || 30);
-const INTER_WAVE_DELAY_MS = Number(process.env.RPC_INTER_WAVE_DELAY_MS || 60);
+const TIMEOUT_MS = Number(process.env.RPC_SEND_TIMEOUT_MS || 2000);
+const STAGGER_STEP_MS = Number(process.env.RPC_STAGGER_STEP_MS || 20);
+const INTER_WAVE_DELAY_MS = Number(process.env.RPC_INTER_WAVE_DELAY_MS || 40);
 const MAX_BACKOFF_MS = 60_000;
 
 function nowMs() {
