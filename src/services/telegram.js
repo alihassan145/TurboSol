@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { getPublicKey } from "./wallet.js";
-import { getTokenQuote, performSwap } from "./trading/jupiter.js";
+import { getTokenQuote, performSwap, quickSell } from "./trading/jupiter.js";
 import {
   startLiquidityWatch,
   stopLiquidityWatch,
@@ -91,6 +91,17 @@ function canProceed(chatId, key, minIntervalMs = 800) {
   return true;
 }
 
+// Local timeout wrapper used by buy/sell flows
+function promiseWithTimeout(promise, ms, tag = "timeout") {
+  let to;
+  return Promise.race([
+    promise.finally(() => clearTimeout(to)),
+    new Promise((_, rej) => {
+      to = setTimeout(() => rej(new Error(tag)), ms);
+    }),
+  ]);
+}
+
 function buildMainMenu(chatId) {
   return {
     chat_id: chatId,
@@ -100,6 +111,7 @@ function buildMainMenu(chatId) {
         [
           { text: "Wallet", callback_data: "WALLETS_MENU" },
           { text: "Quick Buy", callback_data: "QUICK_BUY" },
+          { text: "Quick Sell", callback_data: "QUICK_SELL" },
         ],
         [
           { text: "Snipe LP Add", callback_data: "SNIPE_LP" },
@@ -360,6 +372,27 @@ export async function startTelegramBot() {
           );
         } catch (e) {
           await bot.sendMessage(chatId, `Quick Buy failed: ${e?.message || e}`);
+        }
+        return;
+      }
+
+      if (data === "QUICK_SELL") {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Quick Sell" });
+          if (!(await hasUserWallet(chatId))) {
+            await bot.sendMessage(
+              chatId,
+              "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
+            );
+            return;
+          }
+          setPendingInput(chatId, { type: "QUICK_SELL_TOKEN" });
+          await bot.sendMessage(
+            chatId,
+            "💸 Quick Sell\n\nPlease send the token address (mint) you want to sell:"
+          );
+        } catch (e) {
+          await bot.sendMessage(chatId, `Quick Sell failed: ${e?.message || e}`);
         }
         return;
       }
@@ -1053,37 +1086,31 @@ export async function startTelegramBot() {
             await bot.sendMessage(chatId, "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet.");
             return;
           }
+          let swapPromise;
           try {
             const requireLpLock = String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() === "true" || process.env.REQUIRE_LP_LOCK === "1";
             const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
             const risk = await riskCheckToken(tokenAddress, { requireLpLock, maxBuyTaxBps });
             if (!risk.ok) {
-              await bot.sendMessage(chatId, `🚫 Trade blocked: ${risk.reasons?.join("; ")}`);
+              await bot.sendMessage(chatId, `❌ Risk check failed: ${risk.reason}`);
+              setPendingInput(chatId, null);
               return;
             }
-          } catch {}
-
-          console.log("[TELEGRAM] Quick Buy executing", { tokenAddress, amountSol });
-          await bot.sendMessage(chatId, `⏳ Placing buy of ${amountSol} SOL for token ${tokenAddress}...`);
-
-          const SWAP_TIMEOUT_MS = Number(process.env.SWAP_TIMEOUT_MS || 15000);
-          function promiseWithTimeout(promise, ms, tag = "swap_timeout") {
-            let to;
-            return Promise.race([
-              promise.finally(() => clearTimeout(to)),
-              new Promise((_, rej) => { to = setTimeout(() => rej(new Error(tag)), ms); }),
-            ]);
-          }
-
-          const swapPromise = performSwap({
-            inputMint: "So11111111111111111111111111111111111111112",
-            outputMint: tokenAddress,
-            amountSol,
-            chatId,
-          });
-
-          try {
-            const swapRes = await promiseWithTimeout(swapPromise, SWAP_TIMEOUT_MS);
+            const priorityFeeLamports = getPriorityFeeLamports();
+            const useJitoBundle = getUseJitoBundle();
+            await bot.sendMessage(chatId, `⏳ Placing buy ${amountSol} SOL into ${tokenAddress}...`);
+            swapPromise = performSwap({
+              inputMint: "So11111111111111111111111111111111111111112",
+              outputMint: tokenAddress,
+              amountSol,
+              priorityFeeLamports,
+              useJitoBundle,
+              chatId,
+            });
+            const TIMEOUT_MS = Number(process.env.SWAP_TIMEOUT_MS || 18000);
+            await promiseWithTimeout(swapPromise, TIMEOUT_MS, "swap_timeout");
+            const swapRes = await swapPromise;
+            setPendingInput(chatId, null);
             const txid = swapRes?.txid || (Array.isArray(swapRes?.txids) ? swapRes.txids[0] : null);
             if (!txid) throw new Error("Swap succeeded but no txid returned");
             const solscan = `https://solscan.io/tx/${txid}`;
@@ -1122,6 +1149,77 @@ export async function startTelegramBot() {
           await bot.sendMessage(chatId, `❌ Quick Buy error: ${err?.message || err}`);
         }
         setPendingInput(chatId, null);
+        return;
+      }
+
+      // Handle Quick Sell flow: ask for token, then percent, then execute
+      if (state.pendingInput?.type === "QUICK_SELL_TOKEN") {
+        const textIn = msg.text?.trim();
+        const normalizedMint = textIn;
+        try {
+          new PublicKey(normalizedMint);
+        } catch (e) {
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid token address. Please send a valid Solana token address."
+          );
+          return;
+        }
+        setPendingInput(chatId, { type: "QUICK_SELL_PERCENT", tokenAddress: normalizedMint });
+        await bot.sendMessage(
+          chatId,
+          "What percent of your token balance to sell? Send a number 1-100. Default is 100."
+        );
+        return;
+      }
+
+      if (state.pendingInput?.type === "QUICK_SELL_PERCENT") {
+        const { tokenAddress } = state.pendingInput;
+        const raw = (msg.text || "").trim();
+        let percent = Number(raw);
+        if (!Number.isFinite(percent)) percent = 100;
+        percent = Math.max(1, Math.min(100, Math.floor(percent)));
+        if (!canProceed(chatId, "QUICK_SELL_EXECUTE", 1600)) {
+          await bot.sendMessage(chatId, "⏳ Please wait a moment before sending another sell.");
+          return;
+        }
+        if (!(await hasUserWallet(chatId))) {
+          await bot.sendMessage(chatId, "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet.");
+          return;
+        }
+        try {
+          const priorityFeeLamports = getPriorityFeeLamports();
+          const useJitoBundle = getUseJitoBundle();
+          await bot.sendMessage(
+            chatId,
+            `⏳ Placing quick sell of ${percent}% for token ${tokenAddress}...`
+          );
+          const sellRes = await quickSell({
+            tokenMint: tokenAddress,
+            percent,
+            priorityFeeLamports,
+            useJitoBundle,
+            chatId,
+          });
+          setPendingInput(chatId, null);
+          const txid = sellRes?.txid || (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
+          const solscan = txid ? `https://solscan.io/tx/${txid}` : "";
+          const solOut =
+            typeof sellRes?.output?.tokensOut === "number"
+              ? sellRes.output.tokensOut.toFixed(6)
+              : "?";
+          const impact =
+            typeof sellRes?.route?.priceImpactPct === "number"
+              ? `${(sellRes.route.priceImpactPct * 100).toFixed(2)}%`
+              : "?";
+          await bot.sendMessage(
+            chatId,
+            `✅ Sell sent\n• Token: ${tokenAddress}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${sellRes?.route?.labels || "route"}\n• Price impact: ${impact}\n• Slippage: ${sellRes?.slippageBps} bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${sellRes?.via}\n• Latency: ${sellRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`
+          );
+        } catch (e) {
+          const msgErr = (e?.message || String(e)).slice(0, 300);
+          await bot.sendMessage(chatId, `❌ Quick Sell failed: ${msgErr}`);
+        }
         return;
       }
 

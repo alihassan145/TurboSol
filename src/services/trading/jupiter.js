@@ -277,3 +277,18 @@ export async function performSell({ tokenMint, percent = 100, slippageBps = 150,
     chatId,
   });
 }
+
+// Quick-sell convenience wrapper with aggressive defaults for speed
+export async function quickSell({ tokenMint, percent = 100, slippageBps, priorityFeeLamports, useJitoBundle, chatId }) {
+  const defaultSellSlippage = Number(
+    (slippageBps ?? process.env.QUICK_SELL_SLIPPAGE_BPS ?? 200)
+  );
+  return performSell({
+    tokenMint,
+    percent,
+    slippageBps: defaultSellSlippage,
+    priorityFeeLamports,
+    useJitoBundle,
+    chatId,
+  });
+}
