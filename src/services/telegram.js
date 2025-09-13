@@ -575,7 +575,47 @@ export async function startTelegramBot() {
         return;
       }
 
-      // Handle auto-detected token actions
+      // Start Buy/Quote flows from detected mint by asking for amount first
+      if (data.startsWith("START_BUY_")) {
+        const mint = data.slice("START_BUY_".length);
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Buy" });
+          const state = getUserState(chatId);
+          const defaultBuy = state.defaultBuySol ?? 0.05;
+          if (!(await hasUserWallet(chatId))) {
+            await bot.sendMessage(
+              chatId,
+              "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
+            );
+            return;
+          }
+          setPendingInput(chatId, { type: "QUICK_BUY_AMOUNT", tokenAddress: mint });
+          await bot.sendMessage(
+            chatId,
+            `💰 Quick Buy - ${mint}\n\nPlease enter the amount in SOL you want to buy (default: ${defaultBuy} SOL):`
+          );
+        } catch (e) {
+          await bot.sendMessage(chatId, `Buy start failed: ${e?.message || e}`);
+        }
+        return;
+      }
+
+      if (data.startsWith("START_QUOTE_")) {
+        const mint = data.slice("START_QUOTE_".length);
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Quote" });
+          const state = getUserState(chatId);
+          const defaultBuy = state.defaultBuySol ?? 0.05;
+          setPendingInput(chatId, { type: "QUOTE_AMOUNT", tokenAddress: mint });
+          await bot.sendMessage(
+            chatId,
+            `💰 Quote - ${mint}\n\nEnter amount in SOL to quote (default: ${defaultBuy} SOL):`
+          );
+        } catch (e) {
+          await bot.sendMessage(chatId, `Quote start failed: ${e?.message || e}`);
+        }
+        return;
+      }
       if (data.startsWith("AUTO_QUOTE_")) {
         try {
           if (!canProceed(chatId, "AUTO_QUOTE", 700)) {
@@ -1159,7 +1199,7 @@ export async function startTelegramBot() {
         }
       }
 
-      // Detect a plain token address (mint) and offer Buy/Quote options with a default amount
+      // Detect a plain token address (mint) and offer Buy/Quote options with amount prompt
       if (!state.pendingInput) {
         try {
           const normalizedMint = new PublicKey(text.trim()).toBase58();
@@ -1171,8 +1211,11 @@ export async function startTelegramBot() {
               reply_markup: {
                 inline_keyboard: [
                   [
-                    { text: "Buy", callback_data: `AUTO_BUY_${normalizedMint}_${defaultBuy}` },
-                    { text: "Quote", callback_data: `AUTO_QUOTE_${normalizedMint}_${defaultBuy}` },
+                    { text: "Buy (set amount)", callback_data: `START_BUY_${normalizedMint}` },
+                    { text: "Quote (set amount)", callback_data: `START_QUOTE_${normalizedMint}` },
+                  ],
+                  [
+                    { text: `Quick Buy ${defaultBuy} SOL`, callback_data: `AUTO_BUY_${normalizedMint}_${defaultBuy}` },
                   ],
                 ],
               },
