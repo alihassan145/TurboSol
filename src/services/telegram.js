@@ -27,7 +27,7 @@ import {
   setActiveWallet,
   renameUserWallet,
 } from "./userWallets.js";
-import { getWalletInfo, shortenAddress } from "./walletInfo.js";
+import { getWalletInfo, shortenAddress, getWalletSellTokens } from "./walletInfo.js";
 import {
   buildTurboSolMainMenu,
   buildTurboSolSettingsMenu,
@@ -386,13 +386,132 @@ export async function startTelegramBot() {
             );
             return;
           }
-          setPendingInput(chatId, { type: "QUICK_SELL_TOKEN" });
-          await bot.sendMessage(
-            chatId,
-            "💸 Quick Sell\n\nPlease send the token address (mint) you want to sell:"
-          );
+          // Fetch user's SPL tokens with balances (cached)
+          const items = await getWalletSellTokens(chatId);
+          if (!items.length) {
+            const keyboard = [[
+              { text: "🔄 Refresh", callback_data: "QUICK_SELL" },
+              { text: "🏠 Main", callback_data: "MAIN_MENU" },
+            ]];
+            await bot.sendMessage(
+              chatId,
+              "😕 No SPL tokens with balance found in your wallet. If you recently received tokens, tap Refresh (RPC may be slightly delayed).",
+              { reply_markup: { inline_keyboard: keyboard } }
+            );
+            return;
+          }
+          // Build selection keyboard (top 10 by balance)
+          const top = items.slice(0, 10);
+          const keyboard = top.map((t) => {
+            const mint = t.mint;
+            const sym = (t.symbol || "").toString().slice(0, 12);
+            const bal = Number(t.uiAmount || 0).toFixed(4);
+            const label = sym
+              ? `${sym} • ${bal}`
+              : `${mint.slice(0, 4)}…${mint.slice(-4)} • ${bal}`;
+            return [
+              { text: label, callback_data: `SELL_PICK_${mint}` },
+            ];
+          });
+          keyboard.push([
+            { text: "🔄 Refresh", callback_data: "QUICK_SELL" },
+            { text: "🏠 Main", callback_data: "MAIN_MENU" },
+          ]);
+          await bot.sendMessage(chatId, "💸 Quick Sell — Select a token to sell:", {
+            reply_markup: { inline_keyboard: keyboard },
+          });
         } catch (e) {
           await bot.sendMessage(chatId, `Quick Sell failed: ${e?.message || e}`);
+        }
+        return;
+      }
+
+      if (data.startsWith("SELL_PICK_")) {
+        try {
+          const mint = data.slice("SELL_PICK_".length);
+          // Set pending percent input for chosen token
+          setPendingInput(chatId, { type: "QUICK_SELL_PERCENT", tokenAddress: mint });
+          // Try to enrich with cached token info
+          let title = mint;
+          try {
+            const list = await getWalletSellTokens(chatId);
+            const found = list.find((x) => x.mint === mint);
+            if (found) {
+              const sym = (found.symbol || "TOKEN").toString().slice(0, 12);
+              const bal = Number(found.uiAmount || 0).toFixed(4);
+              title = `${sym} (${mint.slice(0, 4)}…${mint.slice(-4)}) — bal ${bal}`;
+            }
+          } catch {}
+          const keyboard = [
+            [
+              { text: "25%", callback_data: `SELL_PCT_25_${mint}` },
+              { text: "50%", callback_data: `SELL_PCT_50_${mint}` },
+              { text: "100%", callback_data: `SELL_PCT_100_${mint}` },
+            ],
+            [
+              { text: "🔙 Back", callback_data: "QUICK_SELL" },
+              { text: "🏠 Main", callback_data: "MAIN_MENU" },
+            ],
+          ];
+          await bot.sendMessage(
+            chatId,
+            `✅ Selected: ${title}\n\nSend a number 1-100 for custom percent, or tap a quick option below:`,
+            { reply_markup: { inline_keyboard: keyboard } }
+          );
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ Could not prepare sell: ${e?.message || e}`);
+        }
+        return;
+      }
+
+      if (data.startsWith("SELL_PCT_")) {
+        try {
+          const rest = data.slice("SELL_PCT_".length); // <pct>_<mint>
+          const [pctStr, mint] = rest.split("_");
+          const percent = Math.max(1, Math.min(100, parseInt(pctStr, 10) || 100));
+          if (!canProceed(chatId, "QUICK_SELL_EXECUTE", 1600)) {
+            await bot.answerCallbackQuery(query.id, { text: "Please wait…" });
+            return;
+          }
+          if (!(await hasUserWallet(chatId))) {
+            await bot.answerCallbackQuery(query.id, { text: "No wallet linked" });
+            await bot.sendMessage(
+              chatId,
+              "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet."
+            );
+            return;
+          }
+          await bot.answerCallbackQuery(query.id, { text: `Selling ${percent}%` });
+          const priorityFeeLamports = getPriorityFeeLamports();
+          const useJitoBundle = getUseJitoBundle();
+          await bot.sendMessage(
+            chatId,
+            `⏳ Placing quick sell of ${percent}% for token ${mint}...`
+          );
+          const sellRes = await quickSell({
+            tokenMint: mint,
+            percent,
+            priorityFeeLamports,
+            useJitoBundle,
+            chatId,
+          });
+          setPendingInput(chatId, null);
+          const txid = sellRes?.txid || (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
+          const solscan = txid ? `https://solscan.io/tx/${txid}` : "";
+          const solOut =
+            typeof sellRes?.output?.tokensOut === "number"
+              ? sellRes.output.tokensOut.toFixed(6)
+              : "?";
+          const impact =
+            typeof sellRes?.route?.priceImpactPct === "number"
+              ? `${(sellRes.route.priceImpactPct * 100).toFixed(2)}%`
+              : "?";
+          await bot.sendMessage(
+            chatId,
+            `✅ Sell sent\n• Token: ${mint}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${sellRes?.route?.labels || "route"}\n• Price impact: ${impact}\n• Slippage: ${sellRes?.slippageBps} bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${sellRes?.via}\n• Latency: ${sellRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`
+          );
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ Quick Sell failed: ${e?.message || e}`);
         }
         return;
       }
