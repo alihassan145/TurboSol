@@ -11,6 +11,7 @@ import {
   rotateRpc,
   setGrpcEndpoint,
   getAllRpcEndpoints,
+  getRpcConnection,
 } from "./rpc.js";
 import {
   setPriorityFeeLamports,
@@ -510,6 +511,8 @@ export async function startTelegramBot() {
             chatId,
             `✅ Sell sent\n• Token: ${mint}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${sellRes?.route?.labels || "route"}\n• Price impact: ${impact}\n• Slippage: ${sellRes?.slippageBps} bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${sellRes?.via}\n• Latency: ${sellRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`
           );
+          // Follow-up: notify on confirmation or failure
+          notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(() => {});
         } catch (e) {
           await bot.sendMessage(chatId, `❌ Quick Sell failed: ${e?.message || e}`);
         }
@@ -658,6 +661,8 @@ export async function startTelegramBot() {
           chatId,
           `✅ Buy sent\n• Token: ${symbol} (${mint})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${swapRes?.route?.labels || "route"}\n• Price impact: ${impact}\n• Slippage: ${swapRes?.slippageBps} bps\n• Priority fee: ${swapRes?.priorityFeeLamports}\n• Via: ${swapRes?.via}\n• Latency: ${swapRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`
         );
+        // Follow-up: notify on confirmation or failure
+        notifyTxStatus(chatId, txid, { kind: "Buy" }).catch(() => {});
         return;
       }
 
@@ -1237,6 +1242,8 @@ export async function startTelegramBot() {
             const tokOut = typeof swapRes?.output?.tokensOut === "number" ? swapRes.output.tokensOut.toFixed(4) : "?";
             const impact = swapRes?.route?.priceImpactPct != null ? `${swapRes.route.priceImpactPct}%` : "?";
             await bot.sendMessage(chatId, `✅ Buy sent\n• Token: ${symbol} (${tokenAddress})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${swapRes?.route?.labels || "route"}\n• Price impact: ${impact}\n• Slippage: ${swapRes?.slippageBps} bps\n• Priority fee: ${swapRes?.priorityFeeLamports}\n• Via: ${swapRes?.via}\n• Latency: ${swapRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`);
+            // Follow-up: notify on confirmation or failure
+            notifyTxStatus(chatId, txid, { kind: "Buy" }).catch(() => {});
           } catch (e) {
             if (String(e?.message || "").includes("swap_timeout")) {
               await bot.sendMessage(chatId, "⏱️ The buy is taking longer than expected due to network congestion. It may still complete. Check /positions or /lasttx in a moment.");
@@ -1333,8 +1340,10 @@ export async function startTelegramBot() {
               : "?";
           await bot.sendMessage(
             chatId,
-            `✅ Sell sent\n• Token: ${tokenAddress}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${sellRes?.route?.labels || "route"}\n• Price impact: ${impact}\n• Slippage: ${sellRes?.slippageBps} bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${sellRes?.via}\n• Latency: ${sellRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`
+            `✅ Sell sent\n• Token: ${mint}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${sellRes?.route?.labels || "route"}\n• Price impact: ${impact}\n• Slippage: ${sellRes?.slippageBps} bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${sellRes?.via}\n• Latency: ${sellRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`
           );
+          // Follow-up: notify on confirmation or failure
+          notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(() => {});
         } catch (e) {
           const msgErr = (e?.message || String(e)).slice(0, 300);
           await bot.sendMessage(chatId, `❌ Quick Sell failed: ${msgErr}`);
@@ -1403,3 +1412,48 @@ export async function startTelegramBot() {
   });
 
 } // close startTelegramBot
+
+// Helper: monitor a tx signature and notify user on success/failure
+async function notifyTxStatus(chatId, txid, { kind = "Trade" } = {}) {
+  try {
+    if (!txid) return;
+    const connection = getRpcConnection();
+    const solscan = `https://solscan.io/tx/${txid}`;
+    const maxWait = Number(process.env.TX_CONFIRM_MAX_WAIT_MS || 90000);
+    const interval = Number(process.env.TX_CONFIRM_POLL_INTERVAL_MS || 2000);
+    const start = Date.now();
+    while (Date.now() - start < maxWait) {
+      try {
+        const st = await connection.getSignatureStatuses([txid]);
+        const s = st?.value?.[0];
+        if (s) {
+          if (s.err) {
+            await bot.sendMessage(
+              chatId,
+              `❌ ${kind} failed\n• Tx: ${txid}\n🔗 ${solscan}`
+            );
+            return;
+          }
+          const status = s.confirmationStatus;
+          if (status === "finalized" || status === "confirmed") {
+            await bot.sendMessage(
+              chatId,
+              `🎉 ${kind} confirmed\n• Tx: ${txid}\n🔗 ${solscan}`
+            );
+            return;
+          }
+        }
+      } catch (e) {
+        // ignore transient RPC errors and keep polling
+      }
+      await new Promise((r) => setTimeout(r, interval));
+    }
+    // Timed out waiting for confirmation
+    await bot.sendMessage(
+      chatId,
+      `⏳ ${kind} still pending…\n• Tx: ${txid}\n🔗 ${solscan}`
+    );
+  } catch (e) {
+    console.error("notifyTxStatus error:", e?.message || e);
+  }
+}
