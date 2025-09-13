@@ -1159,6 +1159,31 @@ export async function startTelegramBot() {
         }
       }
 
+      // Detect a plain token address (mint) and offer Buy/Quote options with a default amount
+      if (!state.pendingInput) {
+        try {
+          const normalizedMint = new PublicKey(text.trim()).toBase58();
+          const defaultBuy = state.defaultBuySol ?? 0.05;
+          await bot.sendMessage(
+            chatId,
+            `Token detected: ${normalizedMint}\n\nChoose an action:`,
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    { text: "Buy", callback_data: `AUTO_BUY_${normalizedMint}_${defaultBuy}` },
+                    { text: "Quote", callback_data: `AUTO_QUOTE_${normalizedMint}_${defaultBuy}` },
+                  ],
+                ],
+              },
+            }
+          );
+          return;
+        } catch (e) {
+          // not a valid mint, continue to other handlers
+        }
+      }
+
       if (state.pendingInput?.type === "IMPORT_WALLET") {
         try {
           const pub = await importUserWallet(chatId, text.trim());
