@@ -77,12 +77,16 @@ export function buildAutomationMenu(chatId) {
     ? "🤖 Auto Snipe (ON)"
     : "🤖 Auto Snipe (OFF)";
   const afkText = state.afkMode ? "😴 AFK Mode (ON)" : "😴 AFK Mode (OFF)";
+  const pumpText = state.pumpFunAlerts
+    ? "🧪 Pump.fun Alerts (ON)"
+    : "🧪 Pump.fun Alerts (OFF)";
 
   return {
     reply_markup: {
       inline_keyboard: [
         [{ text: autoSnipeText, callback_data: "AUTO_SNIPE_TOGGLE" }],
         [{ text: afkText, callback_data: "AFK_MODE_TOGGLE" }],
+        [{ text: pumpText, callback_data: "PUMPFUN_TOGGLE" }],
         [{ text: "⚙ Auto Snipe Config", callback_data: "AUTO_SNIPE_CONFIG" }],
         [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
       ],
@@ -372,6 +376,39 @@ export function buildSnipeDefaultsMenu(chatId) {
           },
         ],
         [{ text: "🔙 Back to Settings", callback_data: "SETTINGS" }],
+      ],
+    },
+  };
+}
+
+export function buildRpcSettingsMenu(chatId) {
+  const state = getUserState(chatId);
+  const relayText = `🔒 Private Relay ${
+    state.enablePrivateRelay ? "ON" : "OFF"
+  }`;
+  const strategyLabel = (state.rpcStrategy || "balanced").toUpperCase();
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "🔄 Rotate RPC", callback_data: "ROTATE_RPC" },
+          { text: "➕ Add RPC", callback_data: "ADD_RPC" },
+        ],
+        [
+          { text: "📡 Set gRPC", callback_data: "SET_GRPC" },
+          { text: "📃 List Endpoints", callback_data: "LIST_RPCS" },
+        ],
+        [
+          { text: relayText, callback_data: "TOGGLE_RELAY" },
+          {
+            text: `⚙️ Strategy: ${strategyLabel}`,
+            callback_data: "CYCLE_RPC_STRATEGY",
+          },
+        ],
+        [
+          { text: "🔙 Back", callback_data: "SETTINGS" },
+          { text: "🏠 Main", callback_data: "MAIN_MENU" },
+        ],
       ],
     },
   };

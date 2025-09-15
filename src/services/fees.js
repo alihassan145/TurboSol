@@ -20,6 +20,15 @@ const DEFAULT_PRIORITY_FEE_LAMPORTS = Number(
   process.env.DEFAULT_PRIORITY_FEE_LAMPORTS || 6000000
 );
 
+// Dynamic max cap configuration (thresholds in ms and caps in lamports)
+const CAP_T1_MS = Number(process.env.PRIORITY_FEE_CAP_T1_MS || 200);
+const CAP_T2_MS = Number(process.env.PRIORITY_FEE_CAP_T2_MS || 500);
+const CAP_T3_MS = Number(process.env.PRIORITY_FEE_CAP_T3_MS || 800);
+const CAP_LOW = Number(process.env.PRIORITY_FEE_CAP_LOW || 6_000_000);
+const CAP_MID = Number(process.env.PRIORITY_FEE_CAP_MID || 10_000_000);
+const CAP_HIGH = Number(process.env.PRIORITY_FEE_CAP_HIGH || 16_000_000);
+const CAP_MAX = Number(process.env.PRIORITY_FEE_CAP_MAX || 24_000_000);
+
 function promiseWithTimeout(promise, ms, tag = "timeout") {
   let to;
   return Promise.race([
@@ -28,6 +37,33 @@ function promiseWithTimeout(promise, ms, tag = "timeout") {
       to = setTimeout(() => rej(new Error(tag)), ms);
     }),
   ]);
+}
+
+/**
+ * Compute a dynamic MAX priority fee cap (lamports) from an observed latency.
+ * Step function by default; configurable via env. Ensures cap >= MIN_PRIORITY_FEE_LAMPORTS.
+ * @param {number} latencyMs
+ * @returns {number}
+ */
+export function computePriorityFeeCap(latencyMs) {
+  let cap;
+  if (!Number.isFinite(latencyMs) || latencyMs < 0) {
+    // Default to mid cap when latency unavailable
+    cap = CAP_MID;
+  } else if (latencyMs < CAP_T1_MS) {
+    cap = CAP_LOW;
+  } else if (latencyMs < CAP_T2_MS) {
+    cap = CAP_MID;
+  } else if (latencyMs < CAP_T3_MS) {
+    cap = CAP_HIGH;
+  } else {
+    cap = CAP_MAX;
+  }
+  // Never cap below the configured minimum send fee floor
+  if (Number.isFinite(MIN_PRIORITY_FEE_LAMPORTS)) {
+    cap = Math.max(cap, MIN_PRIORITY_FEE_LAMPORTS);
+  }
+  return cap;
 }
 
 export async function getAdaptivePriorityFee(connection, sampleSize = 20) {

@@ -11,6 +11,7 @@ export function getUserState(chatId) {
       autoSnipeMode: false,
       afkMode: false,
       stealthMode: false,
+      pumpFunAlerts: false,
       // New settings toggles
       degenMode: false,
       buyProtection: false,
@@ -18,6 +19,8 @@ export function getUserState(chatId) {
       privatePnl: false,
       // Execution preferences
       enablePrivateRelay: false, // use private relay for tx submission instead of public RPC when possible
+      // Add RPC strategy selector (affects micro-batch racing behavior)
+      rpcStrategy: "balanced", // one of: "conservative" | "balanced" | "aggressive"
       // Wallet/positions/trades
       positions: [],
       limitOrders: [],
@@ -120,9 +123,17 @@ export function addTradeLog(chatId, trade) {
     // Adjust snipe slippage based on observed send/confirm latency proxy
     if (avgLat != null) {
       if (avgLat > 900) {
-        state.snipeSlippage = clamp((state.snipeSlippage || 100) + 50, 50, 1000);
+        state.snipeSlippage = clamp(
+          (state.snipeSlippage || 100) + 50,
+          50,
+          1000
+        );
       } else if (avgLat < 350) {
-        state.snipeSlippage = clamp((state.snipeSlippage || 100) - 25, 50, 1000);
+        state.snipeSlippage = clamp(
+          (state.snipeSlippage || 100) - 25,
+          50,
+          1000
+        );
       }
       // Adjust gas price ceiling
       const curMax = Number(state.maxSnipeGasPrice || 200000);

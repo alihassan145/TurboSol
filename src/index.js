@@ -8,6 +8,7 @@ import { connectWalletsDb } from "./services/userWallets.js";
 import { getAllUserStates } from "./services/userState.js";
 import { initSnipeStore, loadActiveSnipes } from "./services/snipeStore.js";
 import { startLiquidityWatch } from "./services/watchers/liquidityWatcher.js";
+import { startRpcHealthLoop } from "./services/rpc.js";
 
 async function main() {
   await connectWalletsDb();
@@ -15,6 +16,9 @@ async function main() {
   await initSnipeStore().catch(() => false);
   await startTelegramBot();
   await startDashboardServer();
+
+  // Start RPC health/latency monitoring loop
+  startRpcHealthLoop({ intervalMs: Number(process.env.RPC_HEALTH_INTERVAL_MS || 3000) });
 
   // Resume active snipes from persistence
   try {

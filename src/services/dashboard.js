@@ -1,91 +1,61 @@
-import express from "express";
-import cors from "cors";
-import { readTrades } from "./tradeStore.js";
-import { getAllUserStates } from "./userState.js";
+import express from 'express';
+import bodyParser from 'body-parser';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { getRpcStatus } from './rpc.js';
 
-export async function startDashboardServer() {
-  const enabled =
-    String(process.env.DASHBOARD_ENABLED || "true").toLowerCase() !== "false";
-  if (!enabled) {
-    console.log("[dashboard] Disabled via env DASHBOARD_ENABLED");
-    return null;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+app.use(bodyParser.json());
+
+// Health endpoint for the app
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: Date.now() });
+});
+
+// Expose enriched RPC status with latency percentiles and rotation metadata
+app.get('/rpc/status', (req, res) => {
+  try {
+    const status = getRpcStatus();
+    res.status(200).json(status);
+  } catch (e) {
+    res.status(500).json({ error: e?.message || 'failed to get rpc status' });
   }
-  const app = express();
-  app.use(cors());
+});
 
-  const PORT = Number(process.env.DASHBOARD_PORT || 8080);
+// Serve user trades
+app.get('/trades', (req, res) => {
+  const userId = req.query.userId;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const filePath = path.join(__dirname, '../../data/trades', `${userId}.jsonl`);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'not found' });
+  const content = fs.readFileSync(filePath, 'utf8');
+  const lines = content.trim().split('\n').map((l) => JSON.parse(l));
+  res.json(lines);
+});
 
-  // Health check
-  app.get("/health", (req, res) => {
-    res.json({ ok: true });
-  });
+// Summary endpoint
+app.get('/summary', (req, res) => {
+  // Placeholder for PnL summary computation
+  res.json({ message: 'Summary not implemented yet' });
+});
 
-  // Get recent trades for a user
-  app.get("/user/:chatId/trades", (req, res) => {
-    const { chatId } = req.params;
-    const limit = Math.min(Number(req.query.limit) || 100, 1000);
-    const trades = readTrades(chatId, limit);
-    res.json({ chatId, trades });
-  });
+// Active users endpoint
+app.get('/active-users', (req, res) => {
+  // Placeholder for active users logic
+  res.json({ users: [] });
+});
 
-  // Summary P&L for a user (today)
-  app.get("/user/:chatId/summary", (req, res) => {
-    const { chatId } = req.params;
-    const trades = readTrades(chatId, 5000); // larger window
-    const dateKey = (ts) => {
-      const d = new Date(ts);
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
-        2,
-        "0"
-      )}-${String(d.getDate()).padStart(2, "0")}`;
-    };
-    const today = dateKey(Date.now());
-    let buySol = 0,
-      sellSol = 0,
-      wins = 0,
-      losses = 0;
-    const byMint = new Map();
-    for (const t of trades) {
-      if (dateKey(t.timestamp) !== today) continue;
-      if (t.kind === "buy") {
-        const s = Number(t.sol || 0);
-        buySol += s;
-        const m = byMint.get(t.mint) || { buy: 0, sell: 0 };
-        m.buy += s;
-        byMint.set(t.mint, m);
-      } else if (t.kind === "sell") {
-        const sOut = Number(t.solOut || t.sol || 0);
-        sellSol += sOut;
-        const m = byMint.get(t.mint) || { buy: 0, sell: 0 };
-        m.sell += sOut;
-        byMint.set(t.mint, m);
-      }
-    }
-    for (const [, v] of byMint) {
-      if (v.sell > 0) {
-        if (v.sell > v.buy) wins++;
-        else losses++;
-      }
-    }
-    const total = wins + losses;
-    const pnl = sellSol - buySol;
-    const winRate = total ? Math.round((wins / total) * 100) : 0;
-    res.json({ chatId, buySol, sellSol, pnl, wins, losses, winRate });
-  });
-
-  // List all active users
-  app.get("/users", (req, res) => {
-    const entries = getAllUserStates().map(([id, state]) => ({
-      chatId: id,
-      trades: state.trades?.length || 0,
-    }));
-    res.json(entries);
-  });
-
+export function startDashboardServer(port = 3000) {
   return new Promise((resolve) => {
-    app.listen(PORT, () => {
-      console.log(`[dashboard] Listening on port ${PORT}`);
-      resolve(app);
+    const server = app.listen(port, () => {
+      console.log(`Dashboard server running on port ${port}`);
+      resolve(server);
     });
   });
 }
+
+export default app;

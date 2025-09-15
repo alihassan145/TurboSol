@@ -7,6 +7,7 @@ import {
 import { getUserPublicKey } from "./userWallets.js";
 import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import axios from "axios";
+import { getParsedTokenAccountsByOwnerRaced } from "./rpc.js";
 
 // In-memory caches for efficiency
 const _tokenListCacheByChat = new Map(); // chatId -> { ts, items }
@@ -19,12 +20,19 @@ const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqUfnv3V9xRpxo3cLZg1VbG7sWXeDaD7B";
 async function getTokenMeta(mint) {
   const now = Date.now();
   const cached = _tokenMetaCache.get(mint);
-  if (cached && now - cached.ts < TOKEN_META_TTL_MS) return { symbol: cached.symbol, name: cached.name };
+  if (cached && now - cached.ts < TOKEN_META_TTL_MS)
+    return { symbol: cached.symbol, name: cached.name };
   try {
     const timeoutMs = Number(process.env.DEXSCREENER_TIMEOUT_MS || 1200);
     const url = `https://api.dexscreener.com/latest/dex/tokens/${mint}`;
-    const res = await axios.get(url, { timeout: timeoutMs, validateStatus: (s) => s >= 200 && s < 500 });
-    const pair = Array.isArray(res?.data?.pairs) && res.data.pairs.length ? res.data.pairs[0] : null;
+    const res = await axios.get(url, {
+      timeout: timeoutMs,
+      validateStatus: (s) => s >= 200 && s < 500,
+    });
+    const pair =
+      Array.isArray(res?.data?.pairs) && res.data.pairs.length
+        ? res.data.pairs[0]
+        : null;
     const symbol = pair?.baseToken?.symbol || undefined;
     const name = pair?.baseToken?.name || undefined;
     _tokenMetaCache.set(mint, { ts: now, symbol, name });
@@ -52,10 +60,14 @@ export async function getWalletSellTokens(chatId) {
   // Fetch all SPL token accounts owned by user for both programs
   let resp1, resp2;
   try {
-    resp1 = await connection.getParsedTokenAccountsByOwner(owner, { programId: new PublicKey(TOKEN_PROGRAM_ID) });
+    resp1 = await getParsedTokenAccountsByOwnerRaced(owner, {
+      programId: new PublicKey(TOKEN_PROGRAM_ID),
+    });
   } catch {}
   try {
-    resp2 = await connection.getParsedTokenAccountsByOwner(owner, { programId: new PublicKey(TOKEN_2022_PROGRAM_ID) });
+    resp2 = await getParsedTokenAccountsByOwnerRaced(owner, {
+      programId: new PublicKey(TOKEN_2022_PROGRAM_ID),
+    });
   } catch {}
   const combined = [
     ...((resp1 && resp1.value) || []),
@@ -82,7 +94,13 @@ export async function getWalletSellTokens(chatId) {
     const uiAmount = raw / Math.pow(10, Math.max(0, decimals));
     if (uiAmount <= 0) continue;
     const meta = await getTokenMeta(mint);
-    items.push({ mint, uiAmount, decimals, symbol: meta.symbol, name: meta.name });
+    items.push({
+      mint,
+      uiAmount,
+      decimals,
+      symbol: meta.symbol,
+      name: meta.name,
+    });
   }
 
   // Sort by descending uiAmount for nicer UX

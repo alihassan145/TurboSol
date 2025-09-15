@@ -1,6 +1,7 @@
-import { Connection, Transaction, ComputeBudgetProgram } from '@solana/web3.js';
-import { EventEmitter } from 'events';
-import axios from 'axios';
+import { Connection, Transaction, ComputeBudgetProgram } from "@solana/web3.js";
+import { EventEmitter } from "events";
+import axios from "axios";
+import { simulateTransactionRaced } from "./rpc.js";
 
 class AdvancedGasTools extends EventEmitter {
   constructor(connection, config = {}) {
@@ -11,15 +12,15 @@ class AdvancedGasTools extends EventEmitter {
       maxFee: 100000, // Maximum fee in microlamports
       urgencyMultiplier: 2.5, // Multiplier for urgent transactions
       networkCongestionFactor: 1.0, // Dynamic based on network
-      ...config
+      ...config,
     };
     this.isRunning = false;
     this.feeMonitor = null;
     this.congestionData = {
       recentFees: [],
       avgFee: 0,
-      congestionLevel: 'low',
-      lastUpdate: 0
+      congestionLevel: "low",
+      lastUpdate: 0,
     };
     this.blockSpaceReservations = new Map();
   }
@@ -27,37 +28,37 @@ class AdvancedGasTools extends EventEmitter {
   async start() {
     if (this.isRunning) return;
     this.isRunning = true;
-    
+
     await this.initializeFeeMonitoring();
     this.startFeeUpdates();
-    
-    console.log('⚡ Advanced gas tools started');
+
+    console.log("⚡ Advanced gas tools started");
   }
 
   stop() {
     this.isRunning = false;
     if (this.feeMonitor) clearInterval(this.feeMonitor);
-    console.log('⚡ Advanced gas tools stopped');
+    console.log("⚡ Advanced gas tools stopped");
   }
 
   async initializeFeeMonitoring() {
     try {
       await this.updateCongestionData();
-      console.log('📊 Fee monitoring initialized');
+      console.log("📊 Fee monitoring initialized");
     } catch (error) {
-      console.error('❌ Failed to initialize fee monitoring:', error.message);
+      console.error("❌ Failed to initialize fee monitoring:", error.message);
     }
   }
 
   startFeeUpdates() {
     this.feeMonitor = setInterval(async () => {
       if (!this.isRunning) return;
-      
+
       try {
         await this.updateCongestionData();
-        this.emit('fee_update', this.congestionData);
+        this.emit("fee_update", this.congestionData);
       } catch (error) {
-        console.error('❌ Fee update error:', error.message);
+        console.error("❌ Fee update error:", error.message);
       }
     }, 1000); // Update every second
   }
@@ -66,43 +67,46 @@ class AdvancedGasTools extends EventEmitter {
     try {
       // Get recent fee statistics
       const recentBlocks = await this.connection.getRecentPrioritizationFees({
-        lockedWritableAccounts: []
+        lockedWritableAccounts: [],
       });
 
       if (recentBlocks.length > 0) {
-        const fees = recentBlocks.slice(-20).map(block => block.prioritizationFee);
+        const fees = recentBlocks
+          .slice(-20)
+          .map((block) => block.prioritizationFee);
         this.congestionData.recentFees = fees;
-        this.congestionData.avgFee = Math.round(fees.reduce((a, b) => a + b, 0) / fees.length);
-        
+        this.congestionData.avgFee = Math.round(
+          fees.reduce((a, b) => a + b, 0) / fees.length
+        );
+
         // Determine congestion level
         if (this.congestionData.avgFee < 1000) {
-          this.congestionData.congestionLevel = 'low';
+          this.congestionData.congestionLevel = "low";
         } else if (this.congestionData.avgFee < 5000) {
-          this.congestionData.congestionLevel = 'medium';
+          this.congestionData.congestionLevel = "medium";
         } else {
-          this.congestionData.congestionLevel = 'high';
+          this.congestionData.congestionLevel = "high";
         }
-        
+
         this.congestionData.lastUpdate = Date.now();
       }
-
     } catch (error) {
-      console.error('❌ Failed to update congestion data:', error.message);
+      console.error("❌ Failed to update congestion data:", error.message);
     }
   }
 
-  calculateOptimalFee(urgency = 'normal', txSize = 200) {
+  calculateOptimalFee(urgency = "normal", txSize = 200) {
     let baseFee = this.congestionData.avgFee || this.config.baseFee;
-    
+
     // Apply urgency multiplier
     switch (urgency.toLowerCase()) {
-      case 'low':
+      case "low":
         baseFee *= 0.5;
         break;
-      case 'high':
+      case "high":
         baseFee *= this.config.urgencyMultiplier;
         break;
-      case 'urgent':
+      case "urgent":
         baseFee *= this.config.urgencyMultiplier * 2;
         break;
       default: // normal
@@ -111,13 +115,13 @@ class AdvancedGasTools extends EventEmitter {
 
     // Apply network congestion factor
     switch (this.congestionData.congestionLevel) {
-      case 'low':
+      case "low":
         baseFee *= 0.8;
         break;
-      case 'medium':
+      case "medium":
         baseFee *= 1.0;
         break;
-      case 'high':
+      case "high":
         baseFee *= 1.5;
         break;
     }
@@ -132,17 +136,24 @@ class AdvancedGasTools extends EventEmitter {
     return baseFee;
   }
 
-  async createOptimizedTransaction(instructions, urgency = 'normal', options = {}) {
+  async createOptimizedTransaction(
+    instructions,
+    urgency = "normal",
+    options = {}
+  ) {
     try {
-      const optimalFee = this.calculateOptimalFee(urgency, options.txSize || 200);
-      
+      const optimalFee = this.calculateOptimalFee(
+        urgency,
+        options.txSize || 200
+      );
+
       // Create compute budget instructions
       const computeBudgetIx = ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: optimalFee
+        microLamports: optimalFee,
       });
 
       const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({
-        units: options.computeUnits || 200000
+        units: options.computeUnits || 200000,
       });
 
       // Build transaction with optimized fees
@@ -153,18 +164,20 @@ class AdvancedGasTools extends EventEmitter {
         transaction,
         fee: optimalFee,
         urgency,
-        congestionLevel: this.congestionData.congestionLevel
+        congestionLevel: this.congestionData.congestionLevel,
       };
-
     } catch (error) {
-      console.error('❌ Failed to create optimized transaction:', error.message);
+      console.error(
+        "❌ Failed to create optimized transaction:",
+        error.message
+      );
       throw error;
     }
   }
 
   async reserveBlockSpace(duration = 30000) {
     const reservationId = Date.now().toString();
-    
+
     try {
       // Create dummy transaction to reserve space
       const dummyTx = new Transaction();
@@ -177,20 +190,19 @@ class AdvancedGasTools extends EventEmitter {
         created: Date.now(),
         duration,
         transaction: dummyTx,
-        replaced: false
+        replaced: false,
       });
 
       console.log(`🎯 Block space reserved: ${reservationId}`);
-      
+
       // Auto-cleanup after duration
       setTimeout(() => {
         this.releaseBlockSpace(reservationId);
       }, duration);
 
       return reservationId;
-
     } catch (error) {
-      console.error('❌ Failed to reserve block space:', error.message);
+      console.error("❌ Failed to reserve block space:", error.message);
       return null;
     }
   }
@@ -204,14 +216,16 @@ class AdvancedGasTools extends EventEmitter {
     try {
       reservation.replaced = true;
       this.blockSpaceReservations.delete(reservationId);
-      
-      console.log(`🔄 Block space reservation replaced: ${reservationId}`);
-      this.emit('reservation_replaced', { reservationId, transaction: realTransaction });
-      
-      return true;
 
+      console.log(`🔄 Block space reservation replaced: ${reservationId}`);
+      this.emit("reservation_replaced", {
+        reservationId,
+        transaction: realTransaction,
+      });
+
+      return true;
     } catch (error) {
-      console.error('❌ Failed to replace reservation:', error.message);
+      console.error("❌ Failed to replace reservation:", error.message);
       return false;
     }
   }
@@ -224,34 +238,47 @@ class AdvancedGasTools extends EventEmitter {
     }
   }
 
-  async sendLatencyOptimizedTransaction(transaction, urgency = 'normal') {
+  async sendLatencyOptimizedTransaction(transaction, urgency = "normal") {
     try {
       const optimalFee = this.calculateOptimalFee(urgency);
-      
+
       // Add compute budget instructions if not present
-      if (!transaction.instructions.some(ix => 
-        ix.programId.toString() === 'ComputeBudget111111111111111111111111111111'
-      )) {
+      if (
+        !transaction.instructions.some(
+          (ix) =>
+            ix.programId.toString() ===
+            "ComputeBudget111111111111111111111111111111"
+        )
+      ) {
         transaction.instructions.unshift(
-          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: optimalFee }),
+          ComputeBudgetProgram.setComputeUnitPrice({
+            microLamports: optimalFee,
+          }),
           ComputeBudgetProgram.setComputeUnitLimit({ units: 200000 })
         );
       }
 
       // Create multiple copies with slight variations
-      const transactions = this.createLatencyOptimizedCopies(transaction, urgency);
-      
-      console.log(`🚀 Sending ${transactions.length} latency-optimized transactions`);
-      
+      const transactions = this.createLatencyOptimizedCopies(
+        transaction,
+        urgency
+      );
+
+      console.log(
+        `🚀 Sending ${transactions.length} latency-optimized transactions`
+      );
+
       return {
         transactions,
         fee: optimalFee,
         urgency,
-        strategy: 'latency_racing'
+        strategy: "latency_racing",
       };
-
     } catch (error) {
-      console.error('❌ Failed to send latency optimized transaction:', error.message);
+      console.error(
+        "❌ Failed to send latency optimized transaction:",
+        error.message
+      );
       throw error;
     }
   }
@@ -259,30 +286,34 @@ class AdvancedGasTools extends EventEmitter {
   createLatencyOptimizedCopies(transaction, urgency) {
     const copies = [];
     const baseFee = this.calculateOptimalFee(urgency);
-    
+
     // Create 3 copies with different fee strategies
     const strategies = [
-      { multiplier: 0.8, label: 'conservative' },
-      { multiplier: 1.0, label: 'standard' },
-      { multiplier: 1.3, label: 'aggressive' }
+      { multiplier: 0.8, label: "conservative" },
+      { multiplier: 1.0, label: "standard" },
+      { multiplier: 1.3, label: "aggressive" },
     ];
 
     for (const strategy of strategies) {
       const copy = new Transaction();
       copy.add(
-        ComputeBudgetProgram.setComputeUnitPrice({ 
-          microLamports: Math.round(baseFee * strategy.multiplier) 
+        ComputeBudgetProgram.setComputeUnitPrice({
+          microLamports: Math.round(baseFee * strategy.multiplier),
         }),
         ComputeBudgetProgram.setComputeUnitLimit({ units: 200000 })
       );
-      copy.add(...transaction.instructions.filter(ix => 
-        ix.programId.toString() !== 'ComputeBudget111111111111111111111111111111'
-      ));
-      
+      copy.add(
+        ...transaction.instructions.filter(
+          (ix) =>
+            ix.programId.toString() !==
+            "ComputeBudget111111111111111111111111111111"
+        )
+      );
+
       copies.push({
         transaction: copy,
         fee: Math.round(baseFee * strategy.multiplier),
-        strategy: strategy.label
+        strategy: strategy.label,
       });
     }
 
@@ -291,17 +322,20 @@ class AdvancedGasTools extends EventEmitter {
 
   async monitorGasPrices() {
     try {
-      const response = await axios.get('https://api.jito.wtf/api/v1/bundles/fee_stats', {
-        timeout: 5000
-      });
-      
+      const response = await axios.get(
+        "https://api.jito.wtf/api/v1/bundles/fee_stats",
+        {
+          timeout: 5000,
+        }
+      );
+
       if (response.data) {
         const jitoFees = response.data;
-        this.emit('jito_fees_update', jitoFees);
+        this.emit("jito_fees_update", jitoFees);
         return jitoFees;
       }
     } catch (error) {
-      console.error('❌ Failed to get Jito fees:', error.message);
+      console.error("❌ Failed to get Jito fees:", error.message);
     }
     return null;
   }
@@ -310,20 +344,20 @@ class AdvancedGasTools extends EventEmitter {
     try {
       const slot = await this.connection.getSlot();
       const blockTime = await this.connection.getBlockTime(slot);
-      
+
       return {
         slot,
         blockTime,
         congestionLevel: this.congestionData.congestionLevel,
         avgFee: this.congestionData.avgFee,
         lastUpdate: this.congestionData.lastUpdate,
-        isHealthy: Date.now() - this.congestionData.lastUpdate < 5000
+        isHealthy: Date.now() - this.congestionData.lastUpdate < 5000,
       };
     } catch (error) {
-      console.error('❌ Failed to get network health:', error.message);
+      console.error("❌ Failed to get network health:", error.message);
       return {
         isHealthy: false,
-        error: error.message
+        error: error.message,
       };
     }
   }
@@ -335,43 +369,49 @@ class AdvancedGasTools extends EventEmitter {
       minFee: Math.min(...this.congestionData.recentFees),
       maxFee: Math.max(...this.congestionData.recentFees),
       congestionLevel: this.congestionData.congestionLevel,
-      reservations: this.blockSpaceReservations.size
+      reservations: this.blockSpaceReservations.size,
     };
   }
 
   async simulateTransactionCost(transaction) {
     try {
-      const simulation = await this.connection.simulateTransaction(transaction);
-      
+      // Use multi-RPC raced simulation for robustness and speed
+      const strategy = this.config?.rpcStrategy || "balanced";
+      const { mapStrategyToMicroBatch } = await import("./rpc.js");
+      const simulation = await simulateTransactionRaced(transaction, {
+        commitment: "confirmed",
+        microBatch: mapStrategyToMicroBatch(strategy),
+      });
+
       return {
-        computeUnits: simulation.value.unitsConsumed || 0,
-        fee: simulation.value.err ? 0 : this.calculateOptimalFee(),
-        success: !simulation.value.err,
-        logs: simulation.value.logs || []
+        computeUnits: simulation.value?.unitsConsumed || 0,
+        fee: simulation.value?.err ? 0 : this.calculateOptimalFee(),
+        success: !simulation.value?.err,
+        logs: simulation.value?.logs || [],
       };
     } catch (error) {
-      console.error('❌ Failed to simulate transaction:', error.message);
+      console.error("❌ Failed to simulate transaction:", error.message);
       return {
         computeUnits: 0,
         fee: 0,
         success: false,
-        error: error.message
+        error: error.message,
       };
     }
   }
 
   async getFeeRecommendations() {
     const recommendations = {
-      low: this.calculateOptimalFee('low'),
-      normal: this.calculateOptimalFee('normal'),
-      high: this.calculateOptimalFee('high'),
-      urgent: this.calculateOptimalFee('urgent')
+      low: this.calculateOptimalFee("low"),
+      normal: this.calculateOptimalFee("normal"),
+      high: this.calculateOptimalFee("high"),
+      urgent: this.calculateOptimalFee("urgent"),
     };
 
     return {
       recommendations,
       congestionLevel: this.congestionData.congestionLevel,
-      lastUpdate: this.congestionData.lastUpdate
+      lastUpdate: this.congestionData.lastUpdate,
     };
   }
 }
