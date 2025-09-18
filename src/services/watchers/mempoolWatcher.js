@@ -1,26 +1,41 @@
 import { getUserConnectionInstance } from "../wallet.js";
-import { getUserState } from "../userState.js";
+import { getUserState, addTradeLog } from "../userState.js";
 import { hasUserWallet } from "../userWallets.js";
 import { startLiquidityWatch } from "./liquidityWatcher.js";
+import { PublicKey } from "@solana/web3.js";
 
 const subs = new Map();
 
-export async function startMempoolWatch(chatId, { programIds = [], onEvent, onSnipeEvent, autoSnipeOnLPEvents = true } = {}) {
+export async function startMempoolWatch(
+  chatId,
+  { programIds = [], onEvent, onSnipeEvent, autoSnipeOnLPEvents = true } = {}
+) {
   const conn = await getUserConnectionInstance(chatId);
   for (const pid of programIds) {
-    const subId = await conn.onLogs(pid, async (logs, ctx) => {
-      try { 
-        onEvent?.({ programId: pid, logs }); 
+    let programKey;
+    try {
+      programKey = new PublicKey(pid);
+    } catch {
+      console.warn(`⚠️ Invalid program id passed to mempool watcher: ${pid}`);
+      continue;
+    }
+    const subId = conn.onLogs(
+      { mentions: [programKey.toBase58()] },
+      async (logs, ctx) => {
+        try {
+          onEvent?.({ programId: pid, logs });
 
-        // Auto-snipe integration: check for mint creation or LP events
-        if (autoSnipeOnLPEvents && await shouldTriggerAutoSnipe(chatId)) {
-          const mint = extractMintFromLogs(logs);
-          if (mint && await isLPEvent(logs)) {
-            await triggerAutoSnipe(chatId, mint, 'mempool', onSnipeEvent);
+          // Auto-snipe integration: check for mint creation or LP events
+          if (autoSnipeOnLPEvents && (await shouldTriggerAutoSnipe(chatId))) {
+            const mint = extractMintFromLogs(logs);
+            if (mint && (await isLPEvent(logs))) {
+              await triggerAutoSnipe(chatId, mint, "mempool", onSnipeEvent);
+            }
           }
-        }
-      } catch {}
-    }, "confirmed");
+        } catch {}
+      },
+      "confirmed"
+    );
     subs.set(`${chatId}:${pid}`, { conn, subId });
   }
 }
@@ -34,17 +49,20 @@ async function shouldTriggerAutoSnipe(chatId) {
 function extractMintFromLogs(logs) {
   const logText = logs?.logs?.join("\n") || "";
   // Look for mint addresses in various patterns
-  const mintMatch = logText.match(/mint\s*:\s*([A-Za-z0-9]{32,44})/i) ||
-                   logText.match(/token.*([A-Za-z0-9]{32,44})/i) ||
-                   logText.match(/([A-Za-z0-9]{32,44}).*mint/i);
+  const mintMatch =
+    logText.match(/mint\s*:\s*([A-Za-z0-9]{32,44})/i) ||
+    logText.match(/token.*([A-Za-z0-9]{32,44})/i) ||
+    logText.match(/([A-Za-z0-9]{32,44}).*mint/i);
   return mintMatch ? mintMatch[1] : null;
 }
 
 async function isLPEvent(logs) {
   const logText = logs?.logs?.join("\n") || "";
   // Heuristics to detect LP creation or funding events
-  return /liquidity|pool|lp|raydium|orca|serum/i.test(logText) ||
-         /initialize.*pool|create.*pool|add.*liquidity/i.test(logText);
+  return (
+    /liquidity|pool|lp|raydium|orca|serum/i.test(logText) ||
+    /initialize.*pool|create.*pool|add.*liquidity/i.test(logText)
+  );
 }
 
 async function triggerAutoSnipe(chatId, mint, source, onSnipeEvent) {
@@ -56,6 +74,23 @@ async function triggerAutoSnipe(chatId, mint, source, onSnipeEvent) {
   const slippageBps = state.snipeSlippage;
   const retryCount = state.snipeRetryCount;
 
+  try {
+    addTradeLog(chatId, {
+      kind: "telemetry",
+      stage: "auto_snipe_trigger",
+      source: `watch:${source}`,
+      signalType: "lp_event",
+      mint,
+      params: {
+        amountSol: defaultSnipe,
+        pollInterval,
+        slippageBps,
+        retryCount,
+        useJitoBundle,
+      },
+    });
+  } catch {}
+
   startLiquidityWatch(chatId, {
     mint,
     amountSol: defaultSnipe,
@@ -64,17 +99,25 @@ async function triggerAutoSnipe(chatId, mint, source, onSnipeEvent) {
     pollInterval,
     slippageBps,
     retryCount,
+    source: `watch:${source}`,
+    signalType: "lp_event",
     onEvent: (m) => {
-      try { onSnipeEvent?.(mint, m); } catch {}
-    }
+      try {
+        onSnipeEvent?.(mint, m);
+      } catch {}
+    },
   });
 }
 
 export function stopMempoolWatch(chatId) {
-  const keys = [...subs.keys()].filter(k => k.startsWith(`${chatId}:`));
+  const keys = [...subs.keys()].filter((k) => k.startsWith(`${chatId}:`));
   for (const k of keys) {
     const { conn, subId } = subs.get(k) || {};
-    if (conn && subId != null) { try { conn.removeOnLogsListener(subId); } catch {} }
+    if (conn && subId != null) {
+      try {
+        conn.removeOnLogsListener(subId);
+      } catch {}
+    }
     subs.delete(k);
   }
 }

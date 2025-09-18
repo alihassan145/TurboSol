@@ -2,6 +2,8 @@ import { Connection, Transaction, ComputeBudgetProgram } from "@solana/web3.js";
 import { EventEmitter } from "events";
 import axios from "axios";
 import { simulateTransactionRaced } from "./rpc.js";
+import { getPriorityFeeLamports } from "./config.js";
+import { getAdaptivePriorityFee } from "./fees.js";
 
 class AdvancedGasTools extends EventEmitter {
   constructor(connection, config = {}) {
@@ -142,10 +144,29 @@ class AdvancedGasTools extends EventEmitter {
     options = {}
   ) {
     try {
-      const optimalFee = this.calculateOptimalFee(
-        urgency,
-        options.txSize || 200
-      );
+      // Use centralized priority fee getter (microLamports per CU)
+      let optimalFee = getPriorityFeeLamports();
+      if (!Number.isFinite(optimalFee) || optimalFee <= 0) {
+        optimalFee = await getAdaptivePriorityFee(this.connection);
+      }
+
+      // Apply optional jitter to compute unit price
+      const priceJitterPct = Math.max(0, Number(process.env.COMPUTE_UNIT_PRICE_JITTER_PCT || 0));
+      if (priceJitterPct > 0) {
+        const sign = Math.random() < 0.5 ? -1 : 1;
+        const jitter = 1 + (sign * (Math.random() * priceJitterPct) / 100);
+        optimalFee = Math.max(1, Math.round(optimalFee * jitter));
+      }
+
+      // Derive compute unit limit with optional jitter
+      const baseUnits = Number(options.computeUnits || process.env.COMPUTE_UNIT_LIMIT_BASE || 200000);
+      const limitJitterPct = Math.max(0, Number(process.env.COMPUTE_UNIT_LIMIT_JITTER_PCT || 0));
+      let finalUnits = baseUnits;
+      if (limitJitterPct > 0) {
+        const sign = Math.random() < 0.5 ? -1 : 1;
+        const jitter = 1 + (sign * (Math.random() * limitJitterPct) / 100);
+        finalUnits = Math.max(10_000, Math.min(1_400_000, Math.round(baseUnits * jitter)));
+      }
 
       // Create compute budget instructions
       const computeBudgetIx = ComputeBudgetProgram.setComputeUnitPrice({
@@ -153,7 +174,7 @@ class AdvancedGasTools extends EventEmitter {
       });
 
       const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({
-        units: options.computeUnits || 200000,
+        units: finalUnits,
       });
 
       // Build transaction with optimized fees
@@ -240,7 +261,11 @@ class AdvancedGasTools extends EventEmitter {
 
   async sendLatencyOptimizedTransaction(transaction, urgency = "normal") {
     try {
-      const optimalFee = this.calculateOptimalFee(urgency);
+      // Use centralized priority fee getter (microLamports per CU)
+      let optimalFee = getPriorityFeeLamports();
+      if (!Number.isFinite(optimalFee) || optimalFee <= 0) {
+        optimalFee = await getAdaptivePriorityFee(this.connection);
+      }
 
       // Add compute budget instructions if not present
       if (
@@ -261,7 +286,8 @@ class AdvancedGasTools extends EventEmitter {
       // Create multiple copies with slight variations
       const transactions = this.createLatencyOptimizedCopies(
         transaction,
-        urgency
+        urgency,
+        optimalFee
       );
 
       console.log(
@@ -283,9 +309,11 @@ class AdvancedGasTools extends EventEmitter {
     }
   }
 
-  createLatencyOptimizedCopies(transaction, urgency) {
+  createLatencyOptimizedCopies(transaction, urgency, baseMicroLamports) {
     const copies = [];
-    const baseFee = this.calculateOptimalFee(urgency);
+    const baseFee = Number.isFinite(baseMicroLamports) && baseMicroLamports > 0
+      ? Math.floor(baseMicroLamports)
+      : this.calculateOptimalFee(urgency);
 
     // Create 3 copies with different fee strategies
     const strategies = [

@@ -1,6 +1,6 @@
 import { getUserConnectionInstance } from "../wallet.js";
 import { PublicKey } from "@solana/web3.js";
-import { getUserState } from "../userState.js";
+import { getUserState, addTradeLog } from "../userState.js";
 import { hasUserWallet } from "../userWallets.js";
 import { startLiquidityWatch } from "./liquidityWatcher.js";
 
@@ -74,6 +74,10 @@ async function triggerAutoSnipe(chatId, mint, source) {
   const slippageBps = state.snipeSlippage;
   const retryCount = state.snipeRetryCount;
 
+  try {
+    addTradeLog(chatId, { kind: "telemetry", stage: "auto_snipe_trigger", source: `watch:${source}`, signalType: "dev_wallet_activity", mint, params: { amountSol: defaultSnipe, pollInterval, slippageBps, retryCount, useJitoBundle } });
+  } catch {}
+
   startLiquidityWatch(chatId, {
     mint,
     amountSol: defaultSnipe,
@@ -82,6 +86,8 @@ async function triggerAutoSnipe(chatId, mint, source) {
     pollInterval,
     slippageBps,
     retryCount,
+    source: `watch:${source}`,
+    signalType: "dev_wallet_activity",
     onEvent: (m) => {
       // Event handler will be provided by caller
     }

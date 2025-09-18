@@ -8,8 +8,12 @@ import {
   markSnipeCancelled,
 } from "../snipeStore.js";
 import { getWatchersPaused, getWatchersSlowMs } from "../config.js";
+import { addTradeLog, getUserState } from "../userState.js";
+import { startFlashLpGuard } from "./stopLossWatcher.js";
+import { alphaBus } from "../alphaDetection.js";
 
 const activeWatchers = new Map();
+const cooldowns = new Map(); // chatId:mint -> cool-until timestamp (ms)
 
 export function startLiquidityWatch(
   chatId,
@@ -25,9 +29,17 @@ export function startLiquidityWatch(
     dynamicSizing,
     minBuySol,
     maxBuySol,
+    source, // optional: origin of this watcher (e.g., 'alpha:pump_launch')
+    signalType, // optional: specific signal type/id
   }
 ) {
   const k = `${chatId}:${mint}`;
+  const COOLDOWN_MS = Number(process.env.SNIPE_COOL_OFF_MS ?? 30000);
+  const coolUntil = cooldowns.get(k) || 0;
+  if (coolUntil && Date.now() < coolUntil) {
+    onEvent?.(`In cool-off for ${Math.max(0, coolUntil - Date.now())}ms. Skipping start.`);
+    return;
+  }
   if (activeWatchers.has(k)) return;
 
   const baseInterval = Math.max(250, Number(pollInterval ?? 300));
@@ -35,6 +47,25 @@ export function startLiquidityWatch(
   let attempts = 0;
   let intervalMs = baseInterval;
   let stopped = false;
+
+  // Liquidity delta heuristics & guardrails (configurable via ENV)
+  const envDeltaEnabled = String(process.env.LIQ_DELTA_ENABLED || "true").toLowerCase() !== "false";
+  const state = getUserState?.(chatId);
+  const LIQ_DELTA_ENABLED = !!(state?.liqDeltaEnabled ?? envDeltaEnabled);
+  const DELTA_PROBE_SOL = Number(
+    state?.liqDeltaProbeSol ?? process.env.LIQ_DELTA_PROBE_SOL ?? 0.1
+  ); // probe size in SOL to estimate unit-out
+  const DELTA_MIN_IMPROV_PCT = Number(
+    state?.liqDeltaMinImprovPct ?? process.env.LIQ_DELTA_MIN_IMPROV_PCT ?? 0
+  ); // require % improvement between polls to fire
+  const DELTA_MAX_PRICE_IMPACT_PCT = Number(
+    state?.deltaMaxPriceImpactPct ?? process.env.DELTA_MAX_PRICE_IMPACT_PCT ?? 8
+  ); // cap impact to avoid thin LP entries
+  const DELTA_MIN_ROUTE_AGE_MS = Number(
+    state?.deltaMinRouteAgeMs ?? process.env.DELTA_MIN_ROUTE_AGE_MS ?? 0
+  ); // optional min age since first route seen
+  let prevUnitOutProbe = null;
+  let routeFirstSeenAt = null;
 
   // Persist the snipe job as active so it can be resumed on restart
   upsertActiveSnipe(chatId, {
@@ -51,6 +82,8 @@ export function startLiquidityWatch(
       dynamicSizing: !!dynamicSizing,
       minBuySol,
       maxBuySol,
+      source,
+      signalType,
     },
   }).catch(() => {});
 
@@ -101,7 +134,87 @@ export function startLiquidityWatch(
         slippageBps: slippageBps ?? 100,
         timeoutMs: 900,
       });
-      if (!route) return; // not ready yet
+      if (!route) {
+        try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "route_check", status: "unavailable", attempt: attempts }); } catch {}
+        return; // not ready yet
+      }
+
+      // Liquidity delta heuristic and guardrails (pre-empt launch readiness)
+      if (LIQ_DELTA_ENABLED) {
+        if (routeFirstSeenAt === null) routeFirstSeenAt = Date.now();
+
+        // Probe with a fixed small size to compute per-SOL unit out and track deltas
+        const probeLamports = Math.max(1_000_000, Math.round(DELTA_PROBE_SOL * 1e9)); // >= 0.001 SOL
+        let probeRoute = null;
+        try {
+          probeRoute = await getQuoteRaw({
+            inputMint: "So11111111111111111111111111111111111111112",
+            outputMint: mint,
+            amountRaw: probeLamports,
+            slippageBps: slippageBps ?? 100,
+            timeoutMs: 700,
+          });
+        } catch {}
+        if (!probeRoute) {
+          onEvent?.("Probe route unavailable yet, waiting...");
+          try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "probe_check", status: "unavailable", attempt: attempts, probeLamports }); } catch {}
+          return;
+        }
+
+        const unitOutProbe = Number(probeRoute.outAmount || 0) / Math.max(1, probeLamports);
+        const priceImpactPct = Number(probeRoute.priceImpactPct ?? route.priceImpactPct ?? 0);
+
+        // Guardrail: avoid entering on very high impact (thin LP)
+        if (priceImpactPct > DELTA_MAX_PRICE_IMPACT_PCT) {
+          onEvent?.(`Impact ${priceImpactPct.toFixed(2)}% > ${DELTA_MAX_PRICE_IMPACT_PCT}%. Waiting for more depth.`);
+          try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "guardrail", reason: "impact_exceeds_threshold", priceImpactPct, threshold: DELTA_MAX_PRICE_IMPACT_PCT, attempt: attempts }); } catch {}
+          prevUnitOutProbe = unitOutProbe;
+          return;
+        }
+
+        // If we have a previous observation, require minimum improvement unless route has aged sufficiently
+        if (prevUnitOutProbe !== null) {
+          const improvPct = ((unitOutProbe - prevUnitOutProbe) / Math.max(1e-12, prevUnitOutProbe)) * 100;
+          const ageMs = Date.now() - routeFirstSeenAt;
+          if (improvPct < DELTA_MIN_IMPROV_PCT && ageMs < DELTA_MIN_ROUTE_AGE_MS) {
+            onEvent?.(`ΔunitOut ${improvPct.toFixed(2)}% < ${DELTA_MIN_IMPROV_PCT}% (age ${ageMs}ms). Waiting.`);
+            try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "guardrail", reason: "improv_below_threshold", improvPct, minImprovementPct: DELTA_MIN_IMPROV_PCT, ageMs, minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS, attempt: attempts }); } catch {}
+            prevUnitOutProbe = unitOutProbe;
+            return;
+          }
+        } else if (DELTA_MIN_ROUTE_AGE_MS > 0) {
+          const age = Date.now() - routeFirstSeenAt;
+          if (age < DELTA_MIN_ROUTE_AGE_MS) {
+            onEvent?.(`Route age ${age}ms < ${DELTA_MIN_ROUTE_AGE_MS}ms. Waiting.`);
+            try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "guardrail", reason: "route_too_young", ageMs: age, minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS, attempt: attempts }); } catch {}
+            prevUnitOutProbe = unitOutProbe;
+            return;
+          }
+        }
+
+        // Update probe baseline for next iteration
+        prevUnitOutProbe = unitOutProbe;
+
+        // Emit a LiquidityDeltaEvent for analytics/orchestration
+        try {
+          alphaBus?.emit?.("liquidity_delta", {
+            chatId,
+            mint,
+            unitOutProbe,
+            prevUnitOutProbe,
+            priceImpactPct,
+            routeAgeMs: Date.now() - (routeFirstSeenAt || Date.now()),
+            threshold: {
+              minImprovementPct: DELTA_MIN_IMPROV_PCT,
+              maxImpactPct: DELTA_MAX_PRICE_IMPACT_PCT,
+              minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
+              probeSol: DELTA_PROBE_SOL,
+            },
+            ts: Date.now(),
+          });
+          try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "delta_emitted", unitOutProbe, priceImpactPct, attempt: attempts }); } catch {}
+        } catch {}
+      }
 
       // Dynamic sizing based on env or param
       const dynEnabled =
@@ -113,9 +226,53 @@ export function startLiquidityWatch(
         const maxSol = Number(
           maxBuySol ?? process.env.MAX_BUY_SOL ?? Math.max(amountSol, 0.5)
         );
-        const impact = Number(route.priceImpactPct ?? 0); // best-effort
-        if (impact >= 5) buyAmountSol = Math.max(minSol, amountSol * 0.5);
-        else if (impact <= 1) buyAmountSol = Math.min(maxSol, amountSol * 2);
+        const impactBase = Number(route.priceImpactPct ?? 0);
+
+        // Probe at smaller and larger sizes to infer LP depth/curvature
+        const smallAmtSol = Math.max(minSol, amountSol * 0.5);
+        const largeAmtSol = Math.min(maxSol, amountSol * 2);
+        try {
+          const [routeSmall, routeLarge] = await Promise.all([
+            getQuoteRaw({
+              inputMint: "So11111111111111111111111111111111111111112",
+              outputMint: mint,
+              amountRaw: Math.round(smallAmtSol * 1e9),
+              slippageBps: slippageBps ?? 100,
+              timeoutMs: 900,
+            }).catch(() => null),
+            getQuoteRaw({
+              inputMint: "So11111111111111111111111111111111111111112",
+              outputMint: mint,
+              amountRaw: Math.round(largeAmtSol * 1e9),
+              slippageBps: slippageBps ?? 100,
+              timeoutMs: 900,
+            }).catch(() => null),
+          ]);
+
+          const unitBase = Number(route?.outAmount || 0) / Math.max(1, Math.round(amountSol * 1e9));
+          const unitSmall = routeSmall ? Number(routeSmall.outAmount || 0) / Math.max(1, Math.round(smallAmtSol * 1e9)) : null;
+          const unitLarge = routeLarge ? Number(routeLarge.outAmount || 0) / Math.max(1, Math.round(largeAmtSol * 1e9)) : null;
+
+          // Depth ratio: how much worse per-SOL output gets when scaling size up
+          let depthRatio = unitLarge && unitBase ? unitLarge / Math.max(1e-12, unitBase) : null;
+
+          // Decision matrix combining price impact and depth ratio
+          if (impactBase >= 7 || (depthRatio !== null && depthRatio < 0.7)) {
+            // Very thin/curved: cut size aggressively
+            buyAmountSol = Math.max(minSol, amountSol * 0.4);
+          } else if (impactBase >= 4 || (depthRatio !== null && depthRatio < 0.85)) {
+            buyAmountSol = Math.max(minSol, amountSol * 0.6);
+          } else if (impactBase <= 1.0 && (depthRatio === null || depthRatio >= 0.95)) {
+            // Deep and flat: scale up within cap
+            buyAmountSol = Math.min(maxSol, amountSol * 1.8);
+          } else if (impactBase <= 2.0 && (depthRatio === null || depthRatio >= 0.9)) {
+            buyAmountSol = Math.min(maxSol, amountSol * 1.4);
+          }
+        } catch {
+          // Fallback to simple impact-only rule if probes fail
+          if (impactBase >= 5) buyAmountSol = Math.max(minSol, amountSol * 0.5);
+          else if (impactBase <= 1) buyAmountSol = Math.min(maxSol, amountSol * 2);
+        }
       }
 
       // Adaptive slippage by attempts (safe and robust without trusting priceImpact schema)
@@ -133,7 +290,7 @@ export function startLiquidityWatch(
       if (prio && attempts <= 3)
         prio = Math.floor(prio * (0.7 + 0.15 * (attempts - 1)));
 
-      const { txid } = await performSwap({
+      const swapRes = await performSwap({
         inputMint: "So11111111111111111111111111111111111111112",
         outputMint: mint,
         amountSol: buyAmountSol,
@@ -142,7 +299,34 @@ export function startLiquidityWatch(
         useJitoBundle,
         chatId,
       });
+      const txid = swapRes?.txid;
       onEvent?.(`Bought ${mint}. Tx: ${txid}`);
+
+      // Record buy trade log with detailed telemetry
+      try {
+        addTradeLog(chatId, {
+          kind: "buy",
+          mint,
+          sol: Number(buyAmountSol),
+          tokens: Number(swapRes?.output?.tokensOut ?? NaN),
+          route: swapRes?.route?.labels,
+          priceImpactPct: swapRes?.route?.priceImpactPct ?? null,
+          slippageBps: swapRes?.slippageBps,
+          priorityFeeLamports: swapRes?.priorityFeeLamports,
+          via: swapRes?.via,
+          latencyMs: swapRes?.latencyMs,
+          txid,
+          lastSendRaceWinner: swapRes?.lastSendRaceWinner ?? null,
+          lastSendRaceAttempts: swapRes?.lastSendRaceAttempts ?? 0,
+          lastSendRaceLatencyMs: swapRes?.lastSendRaceLatencyMs ?? null,
+        });
+      } catch {}
+
+      // Arm Flash-LP guard immediately after buy
+      try {
+        const amtTokens = Number(swapRes?.output?.tokensOut ?? 0);
+        startFlashLpGuard(chatId, { mint, amountTokens: amtTokens, onEvent });
+      } catch {}
 
       // Mark executed in the store before stopping the watcher
       markSnipeExecuted(chatId, mint, { txid }).catch(() => {});
@@ -151,6 +335,29 @@ export function startLiquidityWatch(
     } catch (e) {
       // adaptive backoff up to 2x base
       intervalMs = Math.min(baseInterval * 2, Math.floor(intervalMs * 1.25));
+      // log failure attempt for telemetry
+      try {
+        const failMsg = (e?.message || String(e)).slice(0, 300);
+        addTradeLog(chatId, {
+          kind: "status",
+          statusOf: "buy",
+          mint,
+          sol: Number(amountSol),
+          status: "failed",
+          failReason: failMsg,
+          attempt: attempts,
+        });
+      } catch {}
+      // stop after too many attempts to avoid infinite loops
+      if (attempts >= maxAttempts) {
+        stopped = true;
+        stopLiquidityWatch(chatId, mint);
+        onEvent?.(`Stopped watcher after ${attempts} attempts.`);
+        try {
+          cooldowns.set(k, Date.now() + COOLDOWN_MS);
+          addTradeLog(chatId, { kind: "telemetry", mint, stage: "cooldown_set", coolOffMs: COOLDOWN_MS, attempts });
+        } catch {}
+      }
     }
   };
 

@@ -1,48 +1,85 @@
-let priorityFeeLamports = process.env.DEFAULT_PRIORITY_FEE_LAMPORTS
-  ? Number(process.env.DEFAULT_PRIORITY_FEE_LAMPORTS)
-  : undefined;
-let useJitoBundle = false;
+import dotenv from "dotenv";
+dotenv.config();
+
+let staticPriorityFeeLamports = Number(process.env.PRIORITY_FEE_LAMPORTS || 0);
+let dynamicPriorityFeeLamports = null; // dynamic override by tip optimizer
+let useJitoBundle = (String(process.env.USE_JITO_BUNDLE || "true").toLowerCase() !== "false");
+
+let watchersPaused = false;
+let watchersSlowMs = Number(process.env.WATCHERS_SLOW_MS || 600);
+
+let privateRelayEndpoint = process.env.PRIVATE_RELAY_ENDPOINT || "";
+let privateRelayApiKey = process.env.PRIVATE_RELAY_API_KEY || "";
+// New: relay vendor selection (auto|jito|bloxroute|flashbots|generic)
+let relayVendor = (process.env.PRIVATE_RELAY_VENDOR || "auto").toLowerCase();
 
 export function getPriorityFeeLamports() {
-  return priorityFeeLamports;
+  return dynamicPriorityFeeLamports ?? staticPriorityFeeLamports;
 }
 
 export function setPriorityFeeLamports(value) {
-  if (value === undefined || value === null || Number.isNaN(Number(value))) {
-    priorityFeeLamports = undefined;
+  staticPriorityFeeLamports = Number(value || 0);
+}
+
+export function setDynamicPriorityFeeLamports(value) {
+  if (value == null) {
+    dynamicPriorityFeeLamports = null;
   } else {
-    priorityFeeLamports = Number(value);
+    dynamicPriorityFeeLamports = Number(value || 0);
   }
-  return priorityFeeLamports;
+}
+
+export function getDynamicPriorityFeeLamports() {
+  return dynamicPriorityFeeLamports;
 }
 
 export function getUseJitoBundle() {
-  return useJitoBundle;
+  return !!useJitoBundle;
 }
 
 export function setUseJitoBundle(value) {
-  useJitoBundle = Boolean(value);
-  return useJitoBundle;
+  useJitoBundle = !!value;
 }
-
-// Add: watcher control via env switches
-let watchersPaused =
-  String(process.env.WATCHERS_PAUSED || "").toLowerCase() === "true" ||
-  process.env.WATCHERS_PAUSED === "1";
-let watchersSlowMs = Number(process.env.WATCHERS_SLOW_MS || 0);
 
 export function getWatchersPaused() {
-  return watchersPaused;
+  return !!watchersPaused;
 }
-export function setWatchersPaused(v) {
-  watchersPaused = Boolean(v);
-  return watchersPaused;
+
+export function setWatchersPaused(value) {
+  watchersPaused = !!value;
 }
+
 export function getWatchersSlowMs() {
   return watchersSlowMs;
 }
-export function setWatchersSlowMs(v) {
-  const n = Number(v);
-  watchersSlowMs = Number.isFinite(n) && n >= 0 ? n : 0;
-  return watchersSlowMs;
+
+export function setWatchersSlowMs(value) {
+  watchersSlowMs = Number(value || 0);
+}
+
+export function getPrivateRelayEndpoint() {
+  return privateRelayEndpoint;
+}
+
+export function setPrivateRelayEndpoint(url) {
+  privateRelayEndpoint = String(url || "");
+}
+
+export function getPrivateRelayApiKey() {
+  return privateRelayApiKey;
+}
+
+export function setPrivateRelayApiKey(value) {
+  privateRelayApiKey = String(value || "");
+}
+
+// New: Relay vendor getter/setter
+export function getRelayVendor() {
+  return relayVendor;
+}
+
+export function setRelayVendor(value) {
+  const v = String(value || "auto").toLowerCase();
+  const allowed = ["auto", "jito", "bloxroute", "flashbots", "generic"];
+  relayVendor = allowed.includes(v) ? v : "auto";
 }

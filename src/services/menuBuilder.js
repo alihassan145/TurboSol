@@ -2,16 +2,14 @@ import { getWalletInfo } from "./walletInfo.js";
 import { getRpcStatus } from "./rpcMonitor.js";
 import { getUserState } from "./userState.js";
 import { listUserWallets } from "./userWallets.js";
+import { getRelayVendor } from "./config.js";
 
 export async function buildWalletStatusHeader(chatId) {
-  const walletInfo = await getWalletInfo();
-  const rpcStatus = await getRpcStatus();
-
-  return `💼 **Wallet**: \`${walletInfo.shortAddress}\` 📋
-💰 **Balance**: ${walletInfo.solBalance} SOL ($${walletInfo.usdBalance})
-🌐 **RPC**: ${rpcStatus.display}
-
-━━━━━━━━━━━━━━━━━━━━━`;
+  const info = await getWalletInfo(chatId);
+  const balance = info?.sol?.toFixed?.(4) ?? info?.sol ?? "?";
+  const status = await getRpcStatus();
+  const rpc = status?.best || status?.primary || "RPC";
+  return `Wallet: ${info?.address || "?"}\nSOL: ${balance}\nRPC: ${rpc}`;
 }
 
 export function buildMainMenu() {
@@ -19,50 +17,15 @@ export function buildMainMenu() {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: "💼 Wallet Info", callback_data: "WALLET_INFO" },
-          { text: "🔄 Refresh", callback_data: "REFRESH_DATA" },
-        ],
-        [
-          { text: "🎯 LP Sniper", callback_data: "LP_SNIPER" },
-          { text: "🪝 Pre-LP Sniper", callback_data: "PRE_LP_SNIPER" },
-        ],
-        [
-          { text: "🚀 Quick Snipe", callback_data: "QUICK_SNIPE" },
-          { text: "📡 Mempool Monitor", callback_data: "MEMPOOL_MONITOR" },
-        ],
-        [
-          { text: "🧠 AI Predict", callback_data: "AI_PREDICT" },
-          { text: "🔍 Wallet Tracker", callback_data: "WALLET_TRACKER" },
-        ],
-        [
-          { text: "🛡 Anti-Rug Mode", callback_data: "ANTI_RUG_TOGGLE" },
+          { text: "🎯 Snipe", callback_data: "SNIPE_DEFAULTS" },
           { text: "📈 Positions", callback_data: "POSITIONS" },
         ],
         [
-          { text: "🛠 Trading Tools", callback_data: "TRADING_TOOLS" },
-          { text: "🤖 Automation", callback_data: "AUTOMATION" },
+          { text: "💼 Wallets", callback_data: "WALLETS_MENU" },
+          { text: "🛠 Tools", callback_data: "TRADING_TOOLS" },
         ],
         [
-          {
-            text: "📚 Support & Resources",
-            callback_data: "SUPPORT_RESOURCES",
-          },
-        ],
-      ],
-    },
-  };
-}
-
-export function buildTradingToolsMenu() {
-  return {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "📝 Limit Orders", callback_data: "LIMIT_ORDERS" },
-          { text: "🗂 Bundle Trades", callback_data: "BUNDLE_TRADES" },
-        ],
-        [
-          { text: "📊 Performance Stats", callback_data: "PERFORMANCE_STATS" },
+          { text: "🆘 Support", callback_data: "SUPPORT" },
           { text: "⚙ ", callback_data: "SETTINGS" },
         ],
         [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
@@ -80,6 +43,12 @@ export function buildAutomationMenu(chatId) {
   const pumpText = state.pumpFunAlerts
     ? "🧪 Pump.fun Alerts (ON)"
     : "🧪 Pump.fun Alerts (OFF)";
+  const prelpText = state.preLPWatchEnabled
+    ? "🔬 Pre-LP Scanner (ON)"
+    : "🔬 Pre-LP Scanner (OFF)";
+  const deltaText = state.liqDeltaEnabled
+    ? "📈 Delta Heuristic (ON)"
+    : "📈 Delta Heuristic (OFF)";
 
   return {
     reply_markup: {
@@ -87,8 +56,30 @@ export function buildAutomationMenu(chatId) {
         [{ text: autoSnipeText, callback_data: "AUTO_SNIPE_TOGGLE" }],
         [{ text: afkText, callback_data: "AFK_MODE_TOGGLE" }],
         [{ text: pumpText, callback_data: "PUMPFUN_TOGGLE" }],
+        [{ text: prelpText, callback_data: "PRELP_TOGGLE" }],
+        [{ text: deltaText, callback_data: "DELTA_TOGGLE" }],
         [{ text: "⚙ Auto Snipe Config", callback_data: "AUTO_SNIPE_CONFIG" }],
+        [{ text: "📊 Delta Settings", callback_data: "DELTA_SETTINGS" }],
         [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
+      ],
+    },
+  };
+}
+
+export function buildDeltaSettingsMenu(chatId) {
+  const state = getUserState(chatId);
+  const probe = state.liqDeltaProbeSol ?? (Number(process.env.LIQ_DELTA_PROBE_SOL ?? 0.1));
+  const minImprov = state.liqDeltaMinImprovPct ?? (Number(process.env.LIQ_DELTA_MIN_IMPROV_PCT ?? 0));
+  const maxImpact = state.deltaMaxPriceImpactPct ?? (Number(process.env.DELTA_MAX_PRICE_IMPACT_PCT ?? 8));
+  const minAgeMs = state.deltaMinRouteAgeMs ?? (Number(process.env.DELTA_MIN_ROUTE_AGE_MS ?? 0));
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: `🔍 Probe Size: ${probe} SOL`, callback_data: "SET_DELTA_PROBE" }],
+        [{ text: `📈 Min Improvement: ${minImprov}%`, callback_data: "SET_DELTA_IMPROV" }],
+        [{ text: `🛑 Max Impact: ${maxImpact}%`, callback_data: "SET_DELTA_IMPACT" }],
+        [{ text: `⏱ Min Route Age: ${minAgeMs} ms`, callback_data: "SET_DELTA_AGE" }],
+        [{ text: "🔙 Back", callback_data: "AUTOMATION" }],
       ],
     },
   };
@@ -128,12 +119,18 @@ export function buildLPSniperMenu() {
       inline_keyboard: [
         [
           { text: "🎯 New LP Snipe", callback_data: "NEW_LP_SNIPE" },
-          { text: "📋 Active Snipes", callback_data: "ACTIVE_SNIPES" },
         ],
-        [
-          { text: "⚙ Snipe Settings", callback_data: "SNIPE_SETTINGS" },
-          { text: "📊 Snipe History", callback_data: "SNIPE_HISTORY" },
-        ],
+        [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
+      ],
+    },
+  };
+}
+
+export function buildTradingToolsMenu() {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "📊 Performance Stats", callback_data: "PERFORMANCE_STATS" }],
         [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
       ],
     },
@@ -224,6 +221,15 @@ export function buildTurboSolSettingsMenu(chatId) {
             text: `🔒 Private Relay ${state.enablePrivateRelay ? "ON" : "OFF"}`,
             callback_data: "TOGGLE_RELAY",
           },
+        ],
+        [
+          { text: `📈 Behavior Profiling ${state.enableBehaviorProfiling ? "ON" : "OFF"}` , callback_data: "TOGGLE_BEHAVIOR"},
+        ],
+        [
+          { text: `🕸 Multi-hop Correlation ${state.enableMultiHopCorrelation ? "ON" : "OFF"}` , callback_data: "TOGGLE_MULTIHOP"},
+        ],
+        [
+          { text: `💰 Funding Path Analysis ${state.enableFundingPathAnalysis ? "ON" : "OFF"}` , callback_data: "TOGGLE_FUNDING"},
         ],
         [
           { text: "🔙 Back", callback_data: "MAIN_MENU" },
@@ -382,31 +388,34 @@ export function buildSnipeDefaultsMenu(chatId) {
 }
 
 export function buildRpcSettingsMenu(chatId) {
-  const state = getUserState(chatId);
-  const relayText = `🔒 Private Relay ${
-    state.enablePrivateRelay ? "ON" : "OFF"
-  }`;
-  const strategyLabel = (state.rpcStrategy || "balanced").toUpperCase();
+  const s = getUserState(chatId);
+  const relayOn = s.enablePrivateRelay ? "ON" : "OFF";
+  const strategy = (s.rpcStrategy || "balanced").toLowerCase();
+  const vendor = (getRelayVendor?.() || "auto").toLowerCase();
   return {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: "🔄 Rotate RPC", callback_data: "ROTATE_RPC" },
+          { text: "🔁 Rotate RPC", callback_data: "ROTATE_RPC" },
           { text: "➕ Add RPC", callback_data: "ADD_RPC" },
         ],
         [
-          { text: "📡 Set gRPC", callback_data: "SET_GRPC" },
-          { text: "📃 List Endpoints", callback_data: "LIST_RPCS" },
+          { text: "🔌 Set gRPC", callback_data: "SET_GRPC" },
+          { text: "📋 List Endpoints", callback_data: "LIST_RPCS" },
         ],
         [
-          { text: relayText, callback_data: "TOGGLE_RELAY" },
-          {
-            text: `⚙️ Strategy: ${strategyLabel}`,
-            callback_data: "CYCLE_RPC_STRATEGY",
-          },
+          { text: `Private Relay: ${relayOn}`.trim(), callback_data: "TOGGLE_RELAY" },
+          { text: `Strategy: ${strategy}`, callback_data: "CYCLE_RPC_STRATEGY" },
         ],
         [
-          { text: "🔙 Back", callback_data: "SETTINGS" },
+          { text: `Relay Vendor: ${vendor}`.trim(), callback_data: "CYCLE_RELAY_VENDOR" },
+          { text: "🔐 Set Relay API Key", callback_data: "SET_RELAY_API_KEY" },
+        ],
+        [
+          { text: "🌐 Set Relay Endpoint", callback_data: "SET_RELAY_ENDPOINT_URL" },
+        ],
+        [
+          { text: "⬅️ Back", callback_data: "SETTINGS" },
           { text: "🏠 Main", callback_data: "MAIN_MENU" },
         ],
       ],

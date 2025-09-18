@@ -1,7 +1,7 @@
 import { performSell } from "../trading/jupiter.js";
 import { getUserState } from "../userState.js";
 import { getQuoteRaw } from "../trading/jupiter.js";
-import { getWatchersPaused, getWatchersSlowMs } from "../config.js";
+import { getWatchersPaused, getWatchersSlowMs, getPriorityFeeLamports, getUseJitoBundle } from "../config.js";
 
 const watchers = new Map();
 
@@ -198,4 +198,135 @@ export async function checkStopLoss({
   if (!Number.isFinite(priceLamports)) return { triggered: false };
   const priceSol = priceLamports / 1e9;
   return { triggered: priceSol <= thresholdPrice, priceSol };
+}
+
+// --- Flash LP Guard: Detect transient/flash liquidity and exit immediately ---
+const flashWatchers = new Map();
+
+export function startFlashLpGuard(
+  chatId,
+  {
+    mint,
+    amountTokens,
+    windowMs = Number(process.env.FLASH_LP_WINDOW_MS || 90000),
+    pollMs = Number(process.env.FLASH_LP_POLL_MS || 300),
+    cliffDropPct = Number(process.env.FLASH_LP_CLIFF_DROP_PCT || 25),
+    maxNoQuote = Number(process.env.FLASH_LP_MAX_NOQUOTE || 2),
+    impactExitPct = Number(process.env.FLASH_LP_IMPACT_EXIT_PCT || 60),
+    onEvent,
+  }
+) {
+  const k = `flash:${chatId}:${mint}`;
+  if (flashWatchers.has(k)) return;
+  let running = true;
+  const endAt = Date.now() + Math.max(5000, windowMs);
+  let lastPrice = null;
+  let noQuote = 0;
+
+  const sellAll = async (reason = "Flash LP guard: exiting...") => {
+    try {
+      onEvent?.(`${reason}`);
+      const { txid } = await performSell({
+        tokenMint: mint,
+        percent: 100,
+        slippageBps: Number(process.env.FLASH_LP_EXIT_SLIPPAGE_BPS || 300),
+        priorityFeeLamports: getPriorityFeeLamports(),
+        useJitoBundle: getUseJitoBundle(),
+        chatId,
+      });
+      onEvent?.(`Sold. Tx: ${txid}`);
+    } catch (e) {
+      onEvent?.(`Sell failed: ${e?.message || e}`);
+    }
+  };
+
+  const loop = async () => {
+    if (!running) return;
+    try {
+      if (Date.now() >= endAt) {
+        stopFlashLpGuard(chatId, mint);
+        onEvent?.("Flash-LP guard window ended.");
+        return;
+      }
+      if (getWatchersPaused()) {
+        onEvent?.("Watchers paused by config. Skipping flash-LP guard.");
+        return;
+      }
+      const slowMs = getWatchersSlowMs();
+      if (slowMs > 0) await new Promise((r) => setTimeout(r, slowMs));
+
+      const amt = Math.max(0, Number(amountTokens || 0));
+      const smallProbe = Math.max(0.000001, (amt > 0 ? amt * 0.005 : 0.01));
+      const largeProbe = Math.max(smallProbe * 4, (amt > 0 ? amt * 0.02 : 0.04));
+      const baseSlippage = 150;
+
+      const [routeSmall, routeLarge] = await Promise.all([
+        probeQuote({ mint, probeTokens: smallProbe, baseSlippage, timeoutMs: 900 }).catch(() => null),
+        probeQuote({ mint, probeTokens: largeProbe, baseSlippage, timeoutMs: 900 }).catch(() => null),
+      ]);
+
+      if (!routeSmall && !routeLarge) {
+        noQuote += 1;
+        if (noQuote >= maxNoQuote) {
+          await sellAll("Flash-LP suspected: quotes vanished. Exiting now...");
+          stopFlashLpGuard(chatId, mint);
+          return;
+        }
+        return;
+      }
+      noQuote = 0;
+
+      const priceNow = routeSmall
+        ? (Number(routeSmall.outAmount || 0) / 1e9) / smallProbe
+        : routeLarge
+        ? (Number(routeLarge.outAmount || 0) / 1e9) / largeProbe
+        : null;
+
+      if (lastPrice && priceNow && priceNow < lastPrice * (1 - cliffDropPct / 100)) {
+        await sellAll(`Cliff drop >${cliffDropPct}% detected. Exiting...`);
+        stopFlashLpGuard(chatId, mint);
+        return;
+      }
+      if (priceNow) lastPrice = priceNow;
+
+      // Extreme impact on larger probe implies shallow/vanishing LP
+      const impactLarge = Number(routeLarge?.priceImpactPct ?? 0);
+      if (impactLarge >= impactExitPct) {
+        await sellAll(`Extreme price impact (${impactLarge.toFixed(1)}%). Exiting...`);
+        stopFlashLpGuard(chatId, mint);
+        return;
+      }
+
+      // Disproportionate slippage between small and large probes
+      if (routeSmall && routeLarge) {
+        const unitOutSmall = (Number(routeSmall.outAmount || 0) / 1e9) / smallProbe;
+        const unitOutLarge = (Number(routeLarge.outAmount || 0) / 1e9) / largeProbe;
+        if (Number.isFinite(unitOutSmall) && Number.isFinite(unitOutLarge)) {
+          const ratio = unitOutLarge / Math.max(1e-9, unitOutSmall);
+          if (ratio < 0.5) {
+            await sellAll("Severe liquidity thinness detected. Exiting...");
+            stopFlashLpGuard(chatId, mint);
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      // ignore transient errors
+    } finally {
+      if (running) setTimeout(loop, pollMs);
+    }
+  };
+
+  flashWatchers.set(k, () => {
+    running = false;
+  });
+  onEvent?.(`Flash-LP guard armed for ${mint} (window ${(windowMs / 1000) | 0}s)`);
+  loop();
+}
+
+export function stopFlashLpGuard(chatId, mint) {
+  const k = `flash:${chatId}:${mint}`;
+  const stop = flashWatchers.get(k);
+  if (stop) stop();
+  flashWatchers.delete(k);
 }

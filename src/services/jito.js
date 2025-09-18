@@ -2,8 +2,11 @@
 import grpc from "@grpc/grpc-js";
 import protoLoader from "@grpc/proto-loader";
 import path from "node:path";
-import { getGrpcEndpoint } from "./rpc.js";
+import bs58 from "bs58";
+import { getGrpcEndpoint, simulateTransactionRaced, sendTransactionRaced, getLastSendRaceMeta, mapStrategyToMicroBatch } from "./rpc.js";
 import { getConnection } from "./wallet.js";
+import { addTradeLog, getUserState } from "./userState.js";
+import { recordPriorityFeeFeedback } from "./fees.js";
 
 let jitoClient = null;
 
@@ -129,4 +132,138 @@ export async function jitoHealthCheck() {
       resolve({ ok: false, error: e.message });
     }
   });
+}
+
+// Centralized: simulate -> bundle -> send (fallback), with telemetry
+export async function simulateBundleAndSend({ signedTx, chatId, useJitoBundle = false, priorityFeeMicroLamports }) {
+  const sig = bs58.encode(signedTx.signatures?.[0] || []);
+  const t0 = Date.now();
+  const base64 = serializeToBase64(signedTx);
+
+  // 1) Simulate pre-send (don't block on failure; log telemetry)
+  try {
+    const sim = await simulateTransactionRaced(signedTx, {
+      commitment: "confirmed",
+      simulateOptions: { sigVerify: true },
+    });
+    try {
+      addTradeLog(chatId, {
+        kind: "telemetry",
+        stage: "pre_send_simulation",
+        ok: true,
+        units: sim?.value?.unitsConsumed ?? null,
+        err: null,
+      });
+    } catch {}
+  } catch (e) {
+    try {
+      addTradeLog(chatId, {
+        kind: "telemetry",
+        stage: "pre_send_simulation",
+        ok: false,
+        units: null,
+        err: String(e?.message || e),
+      });
+    } catch {}
+  }
+
+  // 2) Primary path: Jito bundle
+  let via = useJitoBundle ? "jupiter+jito" : "jupiter+rpc";
+  let jitoErr = null;
+  if (useJitoBundle) {
+    const tJ = Date.now();
+    try {
+      const res = await submitBundleWithTarget([base64]).catch(async () => {
+        // fallback to simple submit if target flow not available/supported
+        return await submitSingleAsBundle(base64);
+      });
+      try {
+        addTradeLog(chatId, {
+          kind: "telemetry",
+          stage: "jito_submit",
+          ok: true,
+          uuid: res?.uuid || null,
+          latencyMs: res?.latencyMs ?? Date.now() - tJ,
+        });
+      } catch {}
+      try {
+        recordPriorityFeeFeedback({ fee: priorityFeeMicroLamports ?? null, success: true, latencyMs: Date.now() - tJ, via: "jupiter+jito" });
+      } catch {}
+    } catch (e) {
+      jitoErr = e;
+      try {
+        addTradeLog(chatId, {
+          kind: "telemetry",
+          stage: "jito_submit",
+          ok: false,
+          err: String(e?.message || e),
+          latencyMs: Date.now() - tJ,
+        });
+      } catch {}
+      try {
+        recordPriorityFeeFeedback({ fee: priorityFeeMicroLamports ?? null, success: false, latencyMs: Date.now() - tJ, via: "jupiter+jito" });
+      } catch {}
+    }
+  }
+
+  // 3) Fallback or direct RPC send
+  if (!useJitoBundle || jitoErr) {
+    const state = chatId != null ? getUserState(chatId) : {};
+    const usePrivateRelay = !!state.enablePrivateRelay;
+    const microBatch = mapStrategyToMicroBatch(state.rpcStrategy);
+    const tR = Date.now();
+    try {
+      const sigRpc = await sendTransactionRaced(signedTx, {
+        skipPreflight: true,
+        maxRetries: 0,
+        microBatch,
+        usePrivateRelay,
+      });
+      via = jitoErr ? "jupiter+jito_fallback_rpc" : "jupiter+rpc";
+      try {
+        addTradeLog(chatId, {
+          kind: "telemetry",
+          stage: "rpc_send",
+          ok: true,
+          signature: sigRpc,
+          latencyMs: Date.now() - tR,
+          usePrivateRelay,
+          microBatch,
+        });
+      } catch {}
+      try {
+        recordPriorityFeeFeedback({ fee: priorityFeeMicroLamports ?? null, success: true, latencyMs: Date.now() - tR, via });
+      } catch {}
+    } catch (e) {
+      // If Jito succeeded (no jitoErr), we still return sig; otherwise throw
+      try {
+        addTradeLog(chatId, {
+          kind: "telemetry",
+          stage: "rpc_send",
+          ok: false,
+          err: String(e?.message || e),
+          latencyMs: Date.now() - tR,
+          usePrivateRelay,
+          microBatch,
+        });
+      } catch {}
+      if (!useJitoBundle || jitoErr) {
+        // Both paths failed
+        try {
+          recordPriorityFeeFeedback({ fee: priorityFeeMicroLamports ?? null, success: false, latencyMs: Date.now() - tR, via: "jupiter+rpc" });
+        } catch {}
+        throw e;
+      }
+    }
+  }
+
+  const raceMeta = getLastSendRaceMeta?.() || {};
+  return {
+    txid: sig,
+    via,
+    latencyMs: Date.now() - t0,
+    lastSendRaceWinner: raceMeta?.winner || null,
+    lastSendRaceAttempts: raceMeta?.attempts || 0,
+    lastSendRaceLatencyMs: raceMeta?.latencyMs ?? null,
+  };
 }

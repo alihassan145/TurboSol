@@ -1,19 +1,15 @@
 import axios from "axios";
-import bs58 from "bs58";
 import { PublicKey, VersionedTransaction } from "@solana/web3.js";
 import {
   getRpcConnection,
-  sendTransactionRaced,
-  getLastSendRaceMeta,
-  mapStrategyToMicroBatch,
   getParsedTokenAccountsByOwnerRaced,
 } from "../rpc.js";
 import { getUserWalletInstance } from "../wallet.js";
 import { getAdaptivePriorityFee, computePriorityFeeCap } from "../fees.js";
 import { getPriorityFeeLamports, getUseJitoBundle } from "../config.js";
-import { submitSingleAsBundle } from "../jito.js";
-import { getUserState } from "../userState.js";
+import { simulateBundleAndSend } from "../jito.js";
 import { measureRpcLatency } from "../rpcMonitor.js";
+import { getAdaptiveSlippageBps, recordSlippageFeedback } from "../slippage.js";
 
 const JUP_QUOTE_URL = "https://quote-api.jup.ag/v6/quote";
 const JUP_SWAP_URL = "https://quote-api.jup.ag/v6/swap";
@@ -119,6 +115,15 @@ async function requestSwapTransaction({
   userPublicKey,
   priorityFeeMicroLamports,
 }) {
+  // Optional jitter on priority fee hint for builder
+  let hinted = priorityFeeMicroLamports;
+  const priceJitterPct = Math.max(0, Number(process.env.COMPUTE_UNIT_PRICE_JITTER_PCT || 0));
+  if (Number.isFinite(hinted) && hinted > 0 && priceJitterPct > 0) {
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    const jitter = 1 + (sign * (Math.random() * priceJitterPct) / 100);
+    hinted = Math.max(1, Math.floor(hinted * jitter));
+  }
+
   const buildBody = (overrides = {}) => {
     const body = {
       quoteResponse: route,
@@ -130,11 +135,11 @@ async function requestSwapTransaction({
       ...overrides,
     };
     if (
-      Number.isFinite(priorityFeeMicroLamports) &&
-      priorityFeeMicroLamports > 0 &&
+      Number.isFinite(hinted) &&
+      hinted > 0 &&
       overrides.computeUnitPriceMicroLamports !== null
     ) {
-      body.computeUnitPriceMicroLamports = Math.floor(priorityFeeMicroLamports);
+      body.computeUnitPriceMicroLamports = Math.floor(hinted);
     }
     return body;
   };
@@ -226,48 +231,18 @@ async function signAndBroadcast({
   wallet,
   useJitoBundle = false,
   chatId,
+  priorityFeeMicroLamports,
 }) {
-  const connection = getRpcConnection();
   const raw = Buffer.from(txBase64, "base64");
   const tx = VersionedTransaction.deserialize(raw);
   tx.sign([wallet]);
-  const signedRaw = tx.serialize();
-  const sig = bs58.encode(tx.signatures[0]);
-  let via = useJitoBundle ? "jupiter+jito" : "jupiter+rpc";
-  const t0 = Date.now();
-  let err;
-  if (useJitoBundle) {
-    try {
-      await submitSingleAsBundle(Buffer.from(signedRaw).toString("base64"));
-    } catch (e) {
-      err = e;
-    }
-  }
-  if (!useJitoBundle || err) {
-    try {
-      const state = chatId != null ? getUserState(chatId) : {};
-      const usePrivateRelay = !!state.enablePrivateRelay;
-      const microBatch = mapStrategyToMicroBatch(state.rpcStrategy);
-      await sendTransactionRaced(tx, {
-        skipPreflight: true,
-        maxRetries: 0,
-        microBatch,
-        usePrivateRelay,
-      });
-      via = err ? "jupiter+jito_fallback_rpc" : "jupiter+rpc";
-    } catch (e2) {
-      if (!err) throw e2; // jito succeeded (async) but rpc failed; still return sig
-    }
-  }
-  const raceMeta = getLastSendRaceMeta();
-  return {
-    txid: sig,
-    via,
-    latencyMs: Date.now() - t0,
-    lastSendRaceWinner: raceMeta?.winner || null,
-    lastSendRaceAttempts: raceMeta?.attempts || 0,
-    lastSendRaceLatencyMs: raceMeta?.latencyMs ?? null,
-  };
+  // Delegate to centralized simulate + bundle + send flow with telemetry
+  return await simulateBundleAndSend({
+    signedTx: tx,
+    chatId,
+    useJitoBundle,
+    priorityFeeMicroLamports,
+  });
 }
 
 export async function performSwap({
@@ -287,11 +262,24 @@ export async function performSwap({
     ? Math.floor(amountRaw)
     : Math.floor(Number(amountSol || 0) * 1e9);
 
+  // Optionally elevate slippage using adaptive heuristic when enabled
+  let slipBps = slippageBps;
+  try {
+    const flag = String(process.env.ADAPTIVE_SLIPPAGE_ENABLED || "").toLowerCase();
+    const enabled = flag === "1" || flag === "true" || flag === "yes";
+    if (enabled) {
+      const adaptive = await getAdaptiveSlippageBps().catch(() => null);
+      if (Number.isFinite(adaptive) && adaptive > 0) {
+        slipBps = Math.max(Number(slipBps) || 0, adaptive);
+      }
+    }
+  } catch {}
+
   let route = await getQuoteRaw({
     inputMint,
     outputMint,
     amountRaw: inAmountRaw,
-    slippageBps,
+    slippageBps: slipBps,
   }).catch(() => null);
   if (!route) throw new Error("no_quote_route");
 
@@ -330,7 +318,7 @@ export async function performSwap({
       inputMint,
       outputMint,
       amountRaw: inAmountRaw,
-      slippageBps,
+      slippageBps: slipBps,
     }).catch(() => null);
     if (!route) throw e1;
     try {
@@ -349,12 +337,36 @@ export async function performSwap({
     }
   }
 
-  const sendRes = await signAndBroadcast({
-    txBase64: txb64,
-    wallet,
-    useJitoBundle: useJitoBundle ?? getUseJitoBundle(),
-    chatId,
-  });
+  let sendRes;
+  try {
+    sendRes = await signAndBroadcast({
+      txBase64: txb64,
+      wallet,
+      useJitoBundle: useJitoBundle ?? getUseJitoBundle(),
+      chatId,
+      priorityFeeMicroLamports: prio,
+    });
+    // Feedback: success case
+    try {
+      recordSlippageFeedback({
+        usedBps: slipBps,
+        priceImpactPct: route?.priceImpactPct,
+        success: true,
+        latencyMs: sendRes?.latencyMs,
+      });
+    } catch {}
+  } catch (e) {
+    // Feedback: failure case (send path failed)
+    try {
+      recordSlippageFeedback({
+        usedBps: slipBps,
+        priceImpactPct: route?.priceImpactPct,
+        success: false,
+        latencyMs: null,
+      });
+    } catch {}
+    throw e;
+  }
 
   const outDecimals = await getMintDecimals(outputMint, connection).catch(
     () => 6
@@ -369,7 +381,7 @@ export async function performSwap({
       labels: deriveRouteLabels(route),
       outAmount: route.outAmount,
     },
-    slippageBps,
+    slippageBps: slipBps,
     priorityFeeLamports: prio,
     via: sendRes.via,
     latencyMs: sendRes.latencyMs,

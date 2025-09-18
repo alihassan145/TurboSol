@@ -13,6 +13,7 @@ class PreLPScanner extends EventEmitter {
     this.monitoredTokens = new Set();
     this.scanInterval = null;
     this.mempoolCache = new Map();
+    this.seenPumpSigs = new Set();
   }
 
   async start() {
@@ -44,13 +45,13 @@ class PreLPScanner extends EventEmitter {
   async scanMempool() {
     try {
       // Get recent signatures from network
-      const signatures = await this.connection.getConfirmedSignaturesForAddress2(
+      const signatures = await this.connection.getSignaturesForAddress(
         new PublicKey(PUMP_FUN_PROGRAM),
         { limit: 100 }
       );
 
       for (const sig of signatures) {
-        if (this.mempoolCache.has(sig.signature)) continue;
+        if (this.mempoolCache.has(sig.signature) || this.seenPumpSigs.has(sig.signature)) continue;
         
         try {
           const tx = await this.connection.getTransaction(sig.signature, {
@@ -65,6 +66,11 @@ class PreLPScanner extends EventEmitter {
             timestamp: Date.now(),
             transaction: tx
           });
+          this.seenPumpSigs.add(sig.signature);
+          if (this.seenPumpSigs.size > 5000) {
+            const keep = Array.from(this.seenPumpSigs).slice(-2500);
+            this.seenPumpSigs = new Set(keep);
+          }
 
           // Clean old cache entries
           this.cleanCache();
@@ -382,3 +388,85 @@ class PreLPScanner extends EventEmitter {
 }
 
 export default PreLPScanner;
+
+// Helper wiring for early snipe on pre-LP signals
+import { getUserConnectionInstance } from './wallet.js';
+import { getUserState, addTradeLog } from './userState.js';
+import { hasUserWallet } from './userWallets.js';
+import { startLiquidityWatch } from './watchers/liquidityWatcher.js';
+
+// Cooldown tracking to avoid duplicate triggers per mint
+const _preLPCool = new Map(); // mint -> lastTriggerMs
+const _preLPInstances = new Map(); // chatId -> scanner instance
+
+async function _shouldTriggerAutoSnipe(chatId) {
+  const state = getUserState(chatId);
+  return state.autoSnipeOnPaste && (await hasUserWallet(chatId));
+}
+
+export async function startPreLPWatch(chatId, { onEvent, onSnipeEvent, autoSnipeOnPreLP = true } = {}) {
+  if (_preLPInstances.has(chatId)) return _preLPInstances.get(chatId);
+  const conn = await getUserConnectionInstance(chatId);
+  const scanner = new PreLPScanner(conn);
+
+  // Configurable guardrails via ENV
+  const CONF_MIN = Number(process.env.PRELP_CONFIDENCE_MIN ?? 50);
+  const COOL_MS = Number(process.env.PRELP_COOL_MS ?? 10000);
+
+  scanner.on('pre_lp_detected', async (details) => {
+    try {
+      onEvent?.({ type: 'pre_lp_detected', details });
+      if (!autoSnipeOnPreLP) return;
+      if (!(await _shouldTriggerAutoSnipe(chatId))) return;
+
+      const mint = details?.token?.mint || details?.mint;
+      const confidence = Number(details?.confidence ?? 0);
+      if (!mint) return;
+      if (confidence < CONF_MIN) return; // guardrail: low-confidence ignore
+
+      const last = _preLPCool.get(mint) || 0;
+      if (Date.now() - last < COOL_MS) return; // cooldown
+
+      _preLPCool.set(mint, Date.now());
+
+      // Pull snipe defaults from user state (same as mempool auto-snipe)
+      const state = getUserState(chatId);
+      const amountSol = state.defaultSnipeSol ?? 0.05;
+      const priorityFeeLamports = state.maxSnipeGasPrice;
+      const useJitoBundle = state.enableJitoForSnipes;
+      const pollInterval = state.snipePollInterval;
+      const slippageBps = state.snipeSlippage;
+      const retryCount = state.snipeRetryCount;
+
+      try {
+        // Persist telemetry for orchestrator decision
+        addTradeLog(chatId, { kind: 'telemetry', stage: 'auto_snipe_trigger', source: 'watch:prelp', signalType: 'pre_lp_detected', mint, params: { amountSol: amountSol, pollInterval, slippageBps, retryCount, useJitoBundle } });
+      } catch {}
+
+      startLiquidityWatch(chatId, {
+        mint,
+        amountSol,
+        priorityFeeLamports,
+        useJitoBundle,
+        pollInterval,
+        slippageBps,
+        retryCount,
+        source: 'watch:prelp',
+        signalType: 'pre_lp_detected',
+        onEvent: (m) => { try { onSnipeEvent?.(mint, m); } catch {} },
+      });
+    } catch {}
+  });
+
+  await scanner.start();
+  _preLPInstances.set(chatId, scanner);
+  return scanner;
+}
+
+export function stopPreLPWatch(chatId) {
+  const inst = _preLPInstances.get(chatId);
+  if (inst) {
+    try { inst.stop(); } catch {}
+    _preLPInstances.delete(chatId);
+  }
+}

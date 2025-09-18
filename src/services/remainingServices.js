@@ -26,7 +26,7 @@ class DevWalletFingerprintingService {
 
   async analyzeCreationPattern(address) {
     try {
-      const signatures = await this.connection.getConfirmedSignaturesForAddress2(
+      const signatures = await this.connection.getSignaturesForAddress(
         new PublicKey(address), { limit: 100 }
       );
       

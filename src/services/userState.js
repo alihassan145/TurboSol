@@ -1,5 +1,7 @@
 // User state management for navigation and settings
 import { appendTrade } from "./tradeStore.js";
+import { recordTradeEvent } from "./analytics/behaviorProfiling.js";
+import { getUserPublicKey } from "./userWallets.js";
 const userStates = new Map();
 
 export function getUserState(chatId) {
@@ -12,6 +14,8 @@ export function getUserState(chatId) {
       afkMode: false,
       stealthMode: false,
       pumpFunAlerts: false,
+      // New: LP unlock alert toggle (used by risk.js -> lpLockEvents wiring)
+      lpUnlockAlerts: true,
       // New settings toggles
       degenMode: false,
       buyProtection: false,
@@ -21,6 +25,10 @@ export function getUserState(chatId) {
       enablePrivateRelay: false, // use private relay for tx submission instead of public RPC when possible
       // Add RPC strategy selector (affects micro-batch racing behavior)
       rpcStrategy: "balanced", // one of: "conservative" | "balanced" | "aggressive"
+      // Analytics toggles
+      enableBehaviorProfiling: false,
+      enableMultiHopCorrelation: false,
+      enableFundingPathAnalysis: false,
       // Wallet/positions/trades
       positions: [],
       limitOrders: [],
@@ -30,6 +38,8 @@ export function getUserState(chatId) {
       // Defaults for quick actions
       defaultBuySol: 0.05,
       defaultSnipeSol: 0.05,
+      // Track last used amounts by mint for quick reuse in Re-Buy/Re-Quote
+      lastAmounts: {},
       // Snipe-specific configuration
       autoSnipeOnPaste: false, // Auto-start snipe without confirmation on address paste
       snipeSlippage: 100, // Custom slippage for snipe operations (in BPS)
@@ -37,6 +47,14 @@ export function getUserState(chatId) {
       snipePollInterval: 300, // Polling interval for liquidity checks (ms)
       enableJitoForSnipes: true, // Use Jito bundling for snipes by default
       snipeRetryCount: 3, // Number of retry attempts on failed snipe
+      // New automation toggles
+      preLPWatchEnabled: false,
+      liqDeltaEnabled: (String(process.env.LIQ_DELTA_ENABLED || "true").toLowerCase() !== "false"),
+      // Per-chat overrides for Liquidity Delta heuristic (null => use ENV defaults)
+      liqDeltaProbeSol: null,           // e.g., 0.1 SOL probe size
+      liqDeltaMinImprovPct: null,       // e.g., require >= X% improvement between probes
+      deltaMaxPriceImpactPct: null,     // e.g., cap entry if price impact > X%
+      deltaMinRouteAgeMs: null,         // e.g., require route age >= X ms before entry
       // Scaling: wallet tiering and spend caps
       tier: "basic",
       tierCaps: { basic: 1, plus: 3, pro: 10 }, // daily SOL cap per tier
@@ -96,81 +114,58 @@ function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
+// Provide helpers for daily spend caps by tier
+export function getDailyCap(chatId) {
+  const state = getUserState(chatId);
+  const tier = state.tier || "basic";
+  const caps = state.tierCaps || {};
+  const cap = caps[tier];
+  return Number.isFinite(cap) ? cap : Infinity;
+}
+
+export function getDailySpent(chatId, ts = Date.now()) {
+  const state = getUserState(chatId);
+  const key = getDateKey(ts);
+  const spent = state.dailySpend?.[key] || 0;
+  return Number(spent) || 0;
+}
+
+export function getRemainingDailyCap(chatId) {
+  const cap = getDailyCap(chatId);
+  const spent = getDailySpent(chatId);
+  return Math.max(0, cap - spent);
+}
+
 export function addTradeLog(chatId, trade) {
   const state = getUserState(chatId);
-  const entry = { ...trade, timestamp: Date.now(), id: Date.now().toString() };
-  state.trades.push(entry);
-  // Persist trades to disk for analytics dashboard
-  appendTrade(chatId, entry);
-  if (state.trades.length > 200) state.trades = state.trades.slice(-200);
-
-  // Track daily spend for buys
-  if (entry.kind === "buy" && typeof entry.sol === "number") {
-    const key = getDateKey(entry.timestamp);
-    state.dailySpend[key] = (state.dailySpend[key] || 0) + Number(entry.sol);
-  }
-
-  // Lightweight adaptive tuning every 20 trades (uses latency heuristic)
-  const N = 20;
-  if (state.trades.length % N === 0) {
-    const lastN = state.trades.slice(-N);
-    const latencies = lastN
-      .map((t) => Number(t.latencyMs || 0))
-      .filter((x) => Number.isFinite(x) && x > 0);
-    const avgLat = latencies.length
-      ? latencies.reduce((a, b) => a + b, 0) / latencies.length
-      : null;
-    // Adjust snipe slippage based on observed send/confirm latency proxy
-    if (avgLat != null) {
-      if (avgLat > 900) {
-        state.snipeSlippage = clamp(
-          (state.snipeSlippage || 100) + 50,
-          50,
-          1000
-        );
-      } else if (avgLat < 350) {
-        state.snipeSlippage = clamp(
-          (state.snipeSlippage || 100) - 25,
-          50,
-          1000
-        );
-      }
-      // Adjust gas price ceiling
-      const curMax = Number(state.maxSnipeGasPrice || 200000);
-      if (avgLat > 900) {
-        state.maxSnipeGasPrice = Math.floor(curMax * 1.2);
-      } else if (avgLat < 350) {
-        state.maxSnipeGasPrice = Math.max(50000, Math.floor(curMax * 0.9));
-      }
-    }
-  }
+  const ts = Date.now();
+  try {
+    state.trades.push({ ...trade, timestamp: ts });
+  } catch {}
+  try {
+    appendTrade(String(chatId), { ...trade, timestamp: ts });
+  } catch {}
+  try {
+    const pub = getUserPublicKey(chatId);
+    recordTradeEvent({ chatId, pub, ...trade, timestamp: ts });
+  } catch {}
 }
 
 export function addLimitOrder(chatId, order) {
   const state = getUserState(chatId);
-  state.limitOrders.push({
-    ...order,
-    timestamp: Date.now(),
-    id: Date.now().toString(),
-    status: "active",
-  });
+  state.limitOrders.push({ ...order, createdAt: Date.now() });
 }
 
 export function addWatchedWallet(chatId, walletAddress, label = "") {
   const state = getUserState(chatId);
-  state.watchedWallets.push({
-    address: walletAddress,
-    label,
-    timestamp: Date.now(),
-    id: Date.now().toString(),
-  });
+  state.watchedWallets.push({ walletAddress, label, addedAt: Date.now() });
 }
 
 export function setPendingInput(chatId, pending) {
   const state = getUserState(chatId);
-  state.pendingInput = pending; // or null to clear
+  state.pendingInput = pending;
 }
 
 export function getAllUserStates() {
-  return Array.from(userStates.entries()); // [ [chatId, state], ... ]
+  return userStates;
 }
