@@ -2,7 +2,7 @@ import { getWalletInfo } from "./walletInfo.js";
 import { getRpcStatus } from "./rpcMonitor.js";
 import { getUserState } from "./userState.js";
 import { listUserWallets } from "./userWallets.js";
-import { getRelayVendor } from "./config.js";
+import { getRelayVendor, getPriorityFeeLamports, getDynamicPriorityFeeLamports } from "./config.js";
 
 export async function buildWalletStatusHeader(chatId) {
   const info = await getWalletInfo(chatId);
@@ -338,7 +338,7 @@ export function buildSupportMenu() {
 // New: Build Snipe Defaults menu
 export function buildSnipeDefaultsMenu(chatId) {
   const state = getUserState(chatId);
-  const autoPasteText = state.autoSnipeOnPaste
+  const autoSnipeText = state.autoSnipeOnPaste
     ? "Auto-Snipe on Paste: ON"
     : "Auto-Snipe on Paste: OFF";
   const jitoText = state.enableJitoForSnipes
@@ -368,7 +368,7 @@ export function buildSnipeDefaultsMenu(chatId) {
           },
         ],
         [
-          { text: autoPasteText, callback_data: "TOGGLE_AUTO_SNIPE_PASTE" },
+          { text: autoSnipeText, callback_data: "TOGGLE_AUTO_SNIPE_PASTE" },
           { text: jitoText, callback_data: "TOGGLE_SNIPE_JITO" },
         ],
         [
@@ -419,6 +419,27 @@ export function buildRpcSettingsMenu(chatId) {
           { text: "🏠 Main", callback_data: "MAIN_MENU" },
         ],
       ],
+    },
+  };
+}
+
+export function buildFeeSettingsMenu(chatId) {
+  // chatId reserved for future per-chat fee scope; currently global
+  const globalFee = getPriorityFeeLamports();
+  const dynamic = getDynamicPriorityFeeLamports();
+  const feeLabel = dynamic != null ? `${globalFee} (dynamic)` : `${globalFee}`;
+  const rows = [
+    [
+      { text: `Global Priority Fee: ${feeLabel}`, callback_data: "SET_PRIORITY_FEE" },
+    ],
+  ];
+  if (dynamic != null) {
+    rows.push([{ text: "Reset Tip Override", callback_data: "RESET_DYNAMIC_FEE" }]);
+  }
+  rows.push([{ text: "🔙 Back to Settings", callback_data: "SETTINGS" }]);
+  return {
+    reply_markup: {
+      inline_keyboard: rows,
     },
   };
 }

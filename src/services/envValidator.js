@@ -134,9 +134,12 @@ export function validateEnvAndInstallRedaction(options = {}) {
   asNumberInRange("DEFAULT_SLIPPAGE_BPS", process.env.DEFAULT_SLIPPAGE_BPS, { min: 1, max: 5000, errors });
   asNumberInRange("QUICK_SELL_SLIPPAGE_BPS", process.env.QUICK_SELL_SLIPPAGE_BPS, { min: 1, max: 5000, errors });
 
+  // Timeouts
   asNumberInRange("QUOTE_TIMEOUT_MS", process.env.QUOTE_TIMEOUT_MS, { min: 100, max: 60000, errors });
   asNumberInRange("SWAP_BUILD_TIMEOUT_MS", process.env.SWAP_BUILD_TIMEOUT_MS, { min: 100, max: 60000, errors });
   asNumberInRange("TOKEN_ACCOUNTS_TIMEOUT_MS", process.env.TOKEN_ACCOUNTS_TIMEOUT_MS, { min: 100, max: 60000, errors });
+  // Add read timeout validation for RPC
+  asNumberInRange("RPC_READ_TIMEOUT_MS", process.env.RPC_READ_TIMEOUT_MS, { min: 500, max: 30000, errors });
 
   asNumberInRange("RPC_HEALTH_INTERVAL_MS", process.env.RPC_HEALTH_INTERVAL_MS, { min: 100, max: 60000, errors });
   asNumberInRange("PRIORITY_FEE_REFRESH_MS", process.env.PRIORITY_FEE_REFRESH_MS, { min: 100, max: 60000, errors });

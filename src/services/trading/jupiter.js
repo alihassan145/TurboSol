@@ -15,6 +15,11 @@ const JUP_QUOTE_URL = "https://quote-api.jup.ag/v6/quote";
 const JUP_SWAP_URL = "https://quote-api.jup.ag/v6/swap";
 export const NATIVE_SOL = "So11111111111111111111111111111111111111112";
 
+// New: default shared accounts behavior is OFF to support Simple AMMs; can be enabled via env
+const defaultUseShared = ["1", "true", "yes"].includes(
+  String(process.env.JUP_USE_SHARED || "false").toLowerCase()
+);
+
 const mintDecimalsCache = new Map();
 
 function promiseWithTimeout(promise, ms, tag = "timeout") {
@@ -130,7 +135,7 @@ async function requestSwapTransaction({
       userPublicKey,
       wrapAndUnwrapSol: true,
       dynamicComputeUnitLimit: true,
-      useSharedAccounts: true,
+      useSharedAccounts: defaultUseShared,
       asLegacyTransaction: false,
       ...overrides,
     };
@@ -146,7 +151,7 @@ async function requestSwapTransaction({
 
   const timeoutMs = Number(process.env.SWAP_BUILD_TIMEOUT_MS || 3000);
 
-  // Attempt 1: default body
+  // Attempt 1: default body (useSharedAccounts per env, default OFF)
   let res;
   try {
     res = await promiseWithTimeout(
@@ -168,7 +173,7 @@ async function requestSwapTransaction({
     return txb64;
   }
 
-  // Attempt 2: retry with useSharedAccounts=false
+  // Attempt 2: retry with flipped useSharedAccounts (true <-> false)
   let lastErrDetail = res?.data
     ? typeof res.data === "string"
       ? res.data
@@ -176,10 +181,14 @@ async function requestSwapTransaction({
     : "";
   try {
     const res2 = await promiseWithTimeout(
-      axios.post(JUP_SWAP_URL, buildBody({ useSharedAccounts: false }), {
-        timeout: timeoutMs,
-        validateStatus: (s) => s >= 200 && s < 500,
-      }),
+      axios.post(
+        JUP_SWAP_URL,
+        buildBody({ useSharedAccounts: !defaultUseShared }),
+        {
+          timeout: timeoutMs,
+          validateStatus: (s) => s >= 200 && s < 500,
+        }
+      ),
       timeoutMs,
       "swap_build_timeout"
     );
@@ -195,12 +204,12 @@ async function requestSwapTransaction({
       : lastErrDetail;
   } catch (_) {}
 
-  // Attempt 3: retry without priority fee field (some backends may reject this field)
+  // Attempt 3: retry without priority fee field (keep flipped useSharedAccounts)
   try {
     const res3 = await promiseWithTimeout(
       axios.post(
         JUP_SWAP_URL,
-        buildBody({ computeUnitPriceMicroLamports: null }),
+        buildBody({ useSharedAccounts: !defaultUseShared, computeUnitPriceMicroLamports: null }),
         { timeout: timeoutMs, validateStatus: (s) => s >= 200 && s < 500 }
       ),
       timeoutMs,
@@ -275,12 +284,57 @@ export async function performSwap({
     }
   } catch {}
 
+  // Robust quote with fallback: retry with longer timeout and higher slippage if needed
+  const baseTimeout = Number(process.env.QUOTE_TIMEOUT_MS || 1200);
+  const fallbackTimeout = Number(
+    process.env.QUOTE_FALLBACK_TIMEOUT_MS || Math.max(2500, baseTimeout * 2)
+  );
+  const fallbackSlippageBps = Number(
+    process.env.QUOTE_FALLBACK_SLIPPAGE_BPS || Math.max(300, slipBps)
+  );
+
   let route = await getQuoteRaw({
     inputMint,
     outputMint,
     amountRaw: inAmountRaw,
     slippageBps: slipBps,
+    timeoutMs: baseTimeout,
   }).catch(() => null);
+
+  if (!route) {
+    // Retry with longer timeout
+    route = await getQuoteRaw({
+      inputMint,
+      outputMint,
+      amountRaw: inAmountRaw,
+      slippageBps: slipBps,
+      timeoutMs: fallbackTimeout,
+    }).catch(() => null);
+  }
+
+  if (!route && fallbackSlippageBps > slipBps) {
+    // Retry with higher slippage and longer timeout
+    route = await getQuoteRaw({
+      inputMint,
+      outputMint,
+      amountRaw: inAmountRaw,
+      slippageBps: fallbackSlippageBps,
+      timeoutMs: fallbackTimeout,
+    }).catch(() => null);
+  }
+
+  if (!route) {
+    // Last attempt: try only direct routes in case aggregator paths are unavailable
+    route = await getQuoteRaw({
+      inputMint,
+      outputMint,
+      amountRaw: inAmountRaw,
+      slippageBps: fallbackSlippageBps,
+      timeoutMs: fallbackTimeout,
+      onlyDirectRoutes: true,
+    }).catch(() => null);
+  }
+
   if (!route) throw new Error("no_quote_route");
 
   let prio = priorityFeeLamports;

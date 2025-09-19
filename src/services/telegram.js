@@ -23,6 +23,7 @@ import {
   setPrivateRelayApiKey,
   getRelayVendor,
   setRelayVendor,
+  setDynamicPriorityFeeLamports,
 } from "./config.js";
 import {
   hasUserWallet,
@@ -49,6 +50,7 @@ import {
   buildAutomationMenu,
   buildRpcSettingsMenu,
   buildDeltaSettingsMenu,
+  buildFeeSettingsMenu,
 } from "./menuBuilder.js";
 import {
   getUserState,
@@ -1091,20 +1093,68 @@ export async function startTelegramBot() {
 
       // Settings submenu handling via callback
       if (data === "SETTINGS") {
-        await bot.editMessageText("⚙️ TurboSol Settings", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildTurboSolSettingsMenu(chatId).reply_markup,
-        });
+        try { await bot.answerCallbackQuery(query.id, { text: "Settings" }); } catch {}
+        try {
+          const markup = buildTurboSolSettingsMenu(chatId).reply_markup;
+          await bot.sendMessage(chatId, "⚙️ TurboSol Settings", { reply_markup: markup });
+        } catch (e) {
+          try { await bot.sendMessage(chatId, "⚙️ TurboSol Settings"); } catch {}
+        }
         return;
       }
 
       if (data === "RPC_SETTINGS" || data === "RPC_CONFIG") {
-        await bot.editMessageText("🌐 RPC Settings", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildRpcSettingsMenu(chatId).reply_markup,
-        });
+        try { await bot.answerCallbackQuery(query.id, { text: "RPC Settings" }); } catch {}
+        try {
+          await bot.editMessageText("🌐 RPC Settings", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildRpcSettingsMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🌐 RPC Settings", {
+            reply_markup: buildRpcSettingsMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
+      // Fee Settings navigation
+      if (data === "FEE_SETTINGS") {
+        try { await bot.answerCallbackQuery(query.id, { text: "Fee Settings" }); } catch {}
+        try {
+          await bot.editMessageText("💰 Fee Settings", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildFeeSettingsMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "💰 Fee Settings", {
+            reply_markup: buildFeeSettingsMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
+      // Fee Settings actions
+      if (data === "SET_PRIORITY_FEE") {
+        setPendingInput(chatId, { type: "SET_PRIORITY_FEE", data: { messageId } });
+        await bot.sendMessage(
+          chatId,
+          "Send global priority fee in lamports (e.g., 100000) or 0 for auto"
+        );
+        return;
+      }
+
+      if (data === "RESET_DYNAMIC_FEE") {
+        setDynamicPriorityFeeLamports(null);
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Tip override cleared" });
+        } catch {}
+        await bot.editMessageReplyMarkup(
+          buildFeeSettingsMenu(chatId).reply_markup,
+          { chat_id: chatId, message_id: messageId }
+        );
         return;
       }
 
@@ -1221,29 +1271,50 @@ export async function startTelegramBot() {
       }
 
       if (data === "TRADING_TOOLS") {
-        await bot.editMessageText("🛠 Trading Tools", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildTradingToolsMenu().reply_markup,
-        });
+        try { await bot.answerCallbackQuery(query.id, { text: "Trading Tools" }); } catch {}
+        try {
+          await bot.editMessageText("🛠 Trading Tools", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildTradingToolsMenu().reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🛠 Trading Tools", {
+            reply_markup: buildTradingToolsMenu().reply_markup,
+          });
+        }
         return;
       }
 
       if (data === "AUTOMATION") {
-        await bot.editMessageText("🤖 Automation", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildAutomationMenu(chatId).reply_markup,
-        });
+        try { await bot.answerCallbackQuery(query.id, { text: "Automation" }); } catch {}
+        try {
+          await bot.editMessageText("🤖 Automation", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildAutomationMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🤖 Automation", {
+            reply_markup: buildAutomationMenu(chatId).reply_markup,
+          });
+        }
         return;
       }
 
       if (data === "DELTA_SETTINGS") {
-        await bot.editMessageText("📊 Delta Settings", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildDeltaSettingsMenu(chatId).reply_markup,
-        });
+        try { await bot.answerCallbackQuery(query.id, { text: "Delta Settings" }); } catch {}
+        try {
+          await bot.editMessageText("📊 Delta Settings", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildDeltaSettingsMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "📊 Delta Settings", {
+            reply_markup: buildDeltaSettingsMenu(chatId).reply_markup,
+          });
+        }
         return;
       }
 
@@ -1274,20 +1345,34 @@ export async function startTelegramBot() {
       }
 
       if (data === "MAIN_MENU") {
-        await bot.editMessageText("🏠 Main Menu", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildMainMenu(chatId).reply_markup,
-        });
+        try { await bot.answerCallbackQuery(query.id, { text: "Main Menu" }); } catch {}
+        try {
+          await bot.editMessageText("🏠 Main Menu", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildMainMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🏠 Main Menu", {
+            reply_markup: buildMainMenu(chatId).reply_markup,
+          });
+        }
         return;
       }
 
       if (data === "SNIPE_DEFAULTS") {
-        await bot.editMessageText("🎯 Snipe Defaults", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
-        });
+        try { await bot.answerCallbackQuery(query.id, { text: "Snipe Defaults" }); } catch {}
+        try {
+          await bot.editMessageText("🎯 Snipe Defaults", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🎯 Snipe Defaults", {
+            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
+          });
+        }
         return;
       }
 
@@ -1301,6 +1386,7 @@ export async function startTelegramBot() {
           });
         } catch {}
         try {
+          try { await bot.answerCallbackQuery(query.id, { text: "Wallets" }); } catch {}
           console.log(`[DEBUG] Building wallets menu for chatId: ${chatId}`);
           const menu = await buildWalletsMenu(chatId);
           console.log(
@@ -1994,6 +2080,27 @@ export async function startTelegramBot() {
         return;
       }
 
+      // Global Fee Settings: set static priority fee lamports
+      if (state.pendingInput?.type === "SET_PRIORITY_FEE") {
+        const raw = (msg.text || "").trim();
+        const val = Number(raw);
+        if (!Number.isFinite(val) || val < 0) {
+          await bot.sendMessage(chatId, "❌ Invalid number. Send 0 or a positive integer lamports value.");
+          return;
+        }
+        setPriorityFeeLamports(val);
+        setPendingInput(chatId, null);
+        if (val === 0) {
+          await bot.sendMessage(chatId, "✅ Auto priority fee enabled (static tip set to 0)");
+        } else {
+          await bot.sendMessage(chatId, `✅ Global priority fee set to ${val} lamports`);
+        }
+        await bot.sendMessage(chatId, "💰 Fee Settings updated:", {
+          reply_markup: buildFeeSettingsMenu(chatId).reply_markup,
+        });
+        return;
+      }
+
       if (state.pendingInput?.type === "RENAME_WALLET") {
         try {
           const { walletId } = state.pendingInput;
@@ -2053,6 +2160,29 @@ export async function startTelegramBot() {
         await bot.sendMessage(chatId, `✅ Delta max price impact set to ${pct}%`);
         await bot.sendMessage(chatId, "📊 Delta Settings updated:", {
           reply_markup: buildDeltaSettingsMenu(chatId).reply_markup,
+        });
+        return;
+      }
+
+      // Snipe Defaults: set per-chat max snipe gas price (priority fee)
+      if (state.pendingInput?.type === "SET_SNIPE_FEE") {
+        const raw = (msg.text || "").trim();
+        const val = Number(raw);
+        if (!Number.isFinite(val) || val < 0) {
+          await bot.sendMessage(chatId, "❌ Invalid number. Send 0 or a positive integer lamports value.");
+          return;
+        }
+        // 0 => auto (fallback to global/auto tip); store 0 so UI shows 'auto'
+        const storeVal = val;
+        updateUserSetting(chatId, "maxSnipeGasPrice", storeVal);
+        setPendingInput(chatId, null);
+        if (storeVal === 0) {
+          await bot.sendMessage(chatId, "✅ Snipe priority fee set to auto");
+        } else {
+          await bot.sendMessage(chatId, `✅ Snipe max priority fee set to ${storeVal} lamports`);
+        }
+        await bot.sendMessage(chatId, "🎯 Snipe Defaults updated:", {
+          reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
         });
         return;
       }
@@ -2299,10 +2429,18 @@ export async function startTelegramBot() {
                 }
               });
             } else {
-              await bot.sendMessage(
-                chatId,
-                `❌ Quick Buy failed: ${e?.message || e}`
-              );
+              const msg = String(e?.message || "");
+              if (msg.includes("no_quote_route")) {
+                await bot.sendMessage(
+                  chatId,
+                  "❌ No swap route available right now.\n• The token may not have liquidity yet or routing is saturated.\n• I retried with higher slippage and a longer quote timeout automatically.\n• Try again in a few seconds, increase slippage in Settings > Trading Tools, or wait for LP to initialize."
+                );
+              } else {
+                await bot.sendMessage(
+                  chatId,
+                  `❌ Quick Buy failed: ${e?.message || e}`
+                );
+              }
               // Record failed buy attempt with reason for telemetry
               try {
                 const failMsg = (e?.message || String(e)).slice(0, 300);

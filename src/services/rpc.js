@@ -5,7 +5,8 @@ import { recordPriorityFeeFeedback } from "./fees.js";
 
 // In-memory endpoint stats for scoring and backoff
 const endpointStats = new Map();
-const TIMEOUT_MS = Number(process.env.RPC_SEND_TIMEOUT_MS || 2000);
+const SEND_TIMEOUT_MS = Number(process.env.RPC_SEND_TIMEOUT_MS || 2000);
+const READ_TIMEOUT_MS = Number(process.env.RPC_READ_TIMEOUT_MS || 5000);
 const STAGGER_STEP_MS = Number(process.env.RPC_STAGGER_STEP_MS || 20);
 const INTER_WAVE_DELAY_MS = Number(process.env.RPC_INTER_WAVE_DELAY_MS || 40);
 const MAX_BACKOFF_MS = 60_000;
@@ -246,7 +247,7 @@ export async function sendTransactionRaced(
         try {
           const sig = await promiseWithTimeout(
             c.sendRawTransaction(raw, opts),
-            TIMEOUT_MS,
+            SEND_TIMEOUT_MS,
             "rpc_send_timeout"
           );
           recordSuccess(url, nowMs() - start);
@@ -284,13 +285,14 @@ export async function sendTransactionRaced(
 export async function submitToPrivateRelay(serializedTx, options = {}) {
   // pull dynamic values from config so Telegram UI updates take effect without restart
   const { getPrivateRelayEndpoint, getPrivateRelayApiKey, getRelayVendor } = await import("./config.js");
-  const relay = getPrivateRelayEndpoint();
+  // Prefer environment variables if present to support test/runtime overrides
+  const relay = process.env.PRIVATE_RELAY_ENDPOINT || getPrivateRelayEndpoint();
   if (!relay) throw new Error("relay_not_configured");
   const txBase64 = Buffer.from(serializedTx).toString("base64");
-  const apiKey = getPrivateRelayApiKey();
+  const apiKey = process.env.PRIVATE_RELAY_API_KEY || getPrivateRelayApiKey();
   const endpoint = relay;
   const prefer = (process.env.PRIVATE_RELAY_PREFER || "").toLowerCase();
-  const vendor = (getRelayVendor?.() || "auto").toLowerCase();
+  const vendor = (process.env.PRIVATE_RELAY_VENDOR || getRelayVendor?.() || "auto").toLowerCase();
 
   // Explicit vendor selection takes precedence
   if (vendor === "jito") {
@@ -527,14 +529,22 @@ async function raceReadAcrossEndpoints({ callImpl, microBatch = 2 }) {
   let attempts = 0;
   let lastError;
 
-  for (const group of groups) {
+  for (let gi = 0; gi < groups.length; gi++) {
+    const group = groups[gi];
+    // Grow timeout per wave up to 3x to accommodate congested RPCs
+    const baseTimeout = READ_TIMEOUT_MS * Math.min(3, gi + 1);
+
     const attemptsInGroup = group.map((url, idx) => {
       const delayMs = idx * STAGGER_STEP_MS + Math.floor(Math.random() * 15);
       return (async () => {
         await sleep(delayMs);
         attempts += 1;
         try {
-          const res = await callImpl(url);
+          const res = await promiseWithTimeout(
+            callImpl(url),
+            baseTimeout,
+            "read_timeout"
+          );
           return res;
         } catch (e) {
           recordFailure(url);
@@ -615,4 +625,37 @@ export function mapStrategyToMicroBatch(strategy) {
   if (s === "aggressive") return 3;
   if (s === "conservative") return 1;
   return 2;
+}
+
+export async function getSignaturesForAddressRaced(
+  address,
+  { commitment = "confirmed", options = {}, microBatch, callImpl } = {}
+) {
+  return raceReadAcrossEndpoints({
+    microBatch: microBatch || getDefaultReadMicroBatch(),
+    callImpl:
+      callImpl ||
+      (async (url) => {
+        const c = new Connection(url, commitment);
+        return c.getSignaturesForAddress(address, options);
+      }),
+  });
+}
+
+export async function getTransactionRaced(
+  signature,
+  { commitment = "confirmed", maxSupportedTransactionVersion = 0, microBatch, callImpl } = {}
+) {
+  return raceReadAcrossEndpoints({
+    microBatch: microBatch || getDefaultReadMicroBatch(),
+    callImpl:
+      callImpl ||
+      (async (url) => {
+        const c = new Connection(url, commitment);
+        return c.getTransaction(signature, {
+          commitment,
+          maxSupportedTransactionVersion,
+        });
+      }),
+  });
 }

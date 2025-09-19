@@ -5,6 +5,7 @@ import { readFileSync } from "fs";
 import { appendTrade } from "./tradeStore.js";
 import https from "https";
 import PumpPortalListener from "./pumpPortalListener.js";
+import { getSignaturesForAddressRaced, getTransactionRaced } from "./rpc.js";
 
 const PUMP_FUN_API = "https://frontend-api.pump.fun";
 const DEV_WALLET_DB_FILE = "./data/dev_wallets.json";
@@ -139,30 +140,45 @@ class AlphaDetection extends EventEmitter {
 
   async checkForTokenActivity(address) {
     try {
-      const signatures = await this.connection.getSignaturesForAddress(
+      const signatures = await getSignaturesForAddressRaced(
         new PublicKey(address),
-        { limit: 10 }
+        { options: { limit: 10 } }
       );
 
       for (const sig of signatures) {
-        const tx = await this.connection.getTransaction(sig.signature, {
-          maxSupportedTransactionVersion: 0,
-        });
-        if (tx && this.isTokenCreation(tx)) {
-          const mint = this.extractMintFromTx(tx);
-          if (mint) {
-            const payload = {
-              address: address,
-              mint: mint,
-              type: "token_creation",
-              timestamp: Date.now(),
-            };
-            this.emit("dev_wallet_activity", payload);
-            try {
-              alphaBus.emit("dev_wallet_activity", payload);
-            } catch {}
+        let tx = null;
+        let attempts = 0;
+        let lastErr = null;
+        const maxAttempts = Number(process.env.ALPHA_TX_FETCH_RETRIES || 3);
+        while (attempts < maxAttempts && !tx) {
+          try {
+            tx = await getTransactionRaced(sig.signature, {
+              maxSupportedTransactionVersion: 0,
+            });
+          } catch (e) {
+            lastErr = e;
+            attempts += 1;
+            if (attempts < maxAttempts) {
+              await new Promise((r) => setTimeout(r, 150 * attempts));
+              continue;
+            }
           }
         }
+         if (tx && this.isTokenCreation(tx)) {
+           const mint = this.extractMintFromTx(tx);
+           if (mint) {
+             const payload = {
+               address: address,
+               mint: mint,
+               type: "token_creation",
+               timestamp: Date.now(),
+             };
+             this.emit("dev_wallet_activity", payload);
+             try {
+               alphaBus.emit("dev_wallet_activity", payload);
+             } catch {}
+           }
+         }
       }
     } catch (error) {
       console.error("❌ Dev wallet monitor error:", error.message);
@@ -173,16 +189,16 @@ class AlphaDetection extends EventEmitter {
   startMempoolScanner() {
     this.mempoolInterval = setInterval(async () => {
       try {
-        const signatures = await this.connection.getSignaturesForAddress(
+        const signatures = await getSignaturesForAddressRaced(
           new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
-          { limit: 100 }
+          { options: { limit: 100 } }
         );
 
         for (const sig of signatures) {
           if (this.seenTokenProgramSigs.has(sig.signature)) continue;
 
           try {
-            const tx = await this.connection.getTransaction(sig.signature, {
+            const tx = await getTransactionRaced(sig.signature, {
               commitment: "confirmed",
               maxSupportedTransactionVersion: 0,
             });
@@ -287,18 +303,30 @@ class AlphaDetection extends EventEmitter {
 
     try {
       // Check funding sources
-      const signatures = await this.connection.getSignaturesForAddress(
+      const signatures = await getSignaturesForAddressRaced(
         new PublicKey(address),
-        { limit: 50 }
+        { options: { limit: 50 } }
       );
 
       for (const sig of signatures) {
-        const tx = await this.connection.getTransaction(sig.signature, {
-          maxSupportedTransactionVersion: 0,
-        });
+        let tx = null;
+        let attempts = 0;
+        const maxAttempts = Number(process.env.ALPHA_TX_FETCH_RETRIES || 3);
+        while (attempts < maxAttempts && !tx) {
+          try {
+            tx = await getTransactionRaced(sig.signature, {
+              maxSupportedTransactionVersion: 0,
+            });
+          } catch (e) {
+            attempts += 1;
+            if (attempts < maxAttempts) {
+              await new Promise((r) => setTimeout(r, 150 * attempts));
+            }
+          }
+        }
         if (tx) {
-          // Look for funding patterns
-          const funding = this.analyzeFunding(tx);
+           // Look for funding patterns
+           const funding = this.analyzeFunding(tx);
           if (funding) {
             correlation.fundingPaths.push(funding);
           }
