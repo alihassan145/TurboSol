@@ -154,3 +154,85 @@ describe("sendTransactionRaced with private relay", () => {
     );
   });
 });
+
+describe("sendTransactionRaced with Flashbots private relay", () => {
+  beforeEach(() => {
+    rpc.__resetRpcStateForTests();
+    process.env.SOLANA_RPC_URL = "";
+    process.env.RPC_HTTP_ENDPOINTS = "http://rpc-a, http://rpc-b";
+    process.env.RPC_SEND_TIMEOUT_MS = "60";
+    process.env.RPC_STAGGER_STEP_MS = "5";
+    process.env.RPC_INTER_WAVE_DELAY_MS = "10";
+    rpc.initializeRpc();
+    axiosPost = undefined;
+    sendImpl = undefined;
+    measureImpl = undefined;
+  });
+
+  afterEach(() => {
+    delete process.env.RPC_HTTP_ENDPOINTS;
+    delete process.env.RPC_SEND_TIMEOUT_MS;
+    delete process.env.RPC_STAGGER_STEP_MS;
+    delete process.env.RPC_INTER_WAVE_DELAY_MS;
+    delete process.env.PRIVATE_RELAY_ENDPOINT;
+    delete process.env.PRIVATE_RELAY_API_KEY;
+    delete process.env.PRIVATE_RELAY_VENDOR;
+  });
+
+  test("uses Flashbots vendor path and succeeds without RPC", async () => {
+    await withEnv(
+      {
+        PRIVATE_RELAY_ENDPOINT: "https://relay.flashbots.mock",
+        PRIVATE_RELAY_VENDOR: "flashbots",
+      },
+      async () => {
+        axiosPost = async (url, body, opts) => {
+          expect(url).toMatch(/flashbots\.mock\/v1\/solana\/submit-bundle$/);
+          expect(body && Array.isArray(body.transactions)).toBe(true);
+          return { status: 200, data: { status: "ok", signature: "FLASH_SIG" } };
+        };
+        // RPC should not be called if relay succeeds
+        sendImpl = () => Promise.reject(new Error("rpc should not be used"));
+
+        const fakeTx = { serialize: () => Buffer.from("00", "hex") };
+        const sig = await rpc.sendTransactionRaced(fakeTx, {
+          microBatch: 1,
+          usePrivateRelay: true,
+        });
+        expect(sig).toBe("FLASH_SIG");
+      }
+    );
+  });
+
+  test("falls back to RPC when Flashbots relay errors", async () => {
+    await withEnv(
+      {
+        PRIVATE_RELAY_ENDPOINT: "https://relay.flashbots.mock",
+        PRIVATE_RELAY_VENDOR: "flashbots",
+      },
+      async () => {
+        axiosPost = async () => {
+          throw new Error("flashbots_down");
+        };
+        // make rpc-b succeed fast
+        measureImpl = async (endpoints) =>
+          endpoints.map((url) => ({
+            url,
+            latency: url.includes("rpc-b") ? 5 : 20,
+          }));
+        sendImpl = (url) =>
+          new Promise((resolve, reject) => {
+            if (url.includes("rpc-b")) setTimeout(() => resolve("SIG_RPC_B"), 10);
+            else setTimeout(() => reject(new Error("boom_a")), 15);
+          });
+
+        const fakeTx = { serialize: () => Buffer.from("00", "hex") };
+        const sig = await rpc.sendTransactionRaced(fakeTx, {
+          microBatch: 1,
+          usePrivateRelay: true,
+        });
+        expect(sig).toBe("SIG_RPC_B");
+      }
+    );
+  });
+});

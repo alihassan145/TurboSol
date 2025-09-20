@@ -2,7 +2,11 @@ import { getWalletInfo } from "./walletInfo.js";
 import { getRpcStatus } from "./rpcMonitor.js";
 import { getUserState } from "./userState.js";
 import { listUserWallets } from "./userWallets.js";
-import { getRelayVendor, getPriorityFeeLamports, getDynamicPriorityFeeLamports } from "./config.js";
+import {
+  getRelayVendor,
+  getPriorityFeeLamports,
+  getDynamicPriorityFeeLamports,
+} from "./config.js";
 
 export async function buildWalletStatusHeader(chatId) {
   const info = await getWalletInfo(chatId);
@@ -68,17 +72,43 @@ export function buildAutomationMenu(chatId) {
 
 export function buildDeltaSettingsMenu(chatId) {
   const state = getUserState(chatId);
-  const probe = state.liqDeltaProbeSol ?? (Number(process.env.LIQ_DELTA_PROBE_SOL ?? 0.1));
-  const minImprov = state.liqDeltaMinImprovPct ?? (Number(process.env.LIQ_DELTA_MIN_IMPROV_PCT ?? 0));
-  const maxImpact = state.deltaMaxPriceImpactPct ?? (Number(process.env.DELTA_MAX_PRICE_IMPACT_PCT ?? 8));
-  const minAgeMs = state.deltaMinRouteAgeMs ?? (Number(process.env.DELTA_MIN_ROUTE_AGE_MS ?? 0));
+  const probe =
+    state.liqDeltaProbeSol ?? Number(process.env.LIQ_DELTA_PROBE_SOL ?? 0.1);
+  const minImprov =
+    state.liqDeltaMinImprovPct ??
+    Number(process.env.LIQ_DELTA_MIN_IMPROV_PCT ?? 0);
+  const maxImpact =
+    state.deltaMaxPriceImpactPct ??
+    Number(process.env.DELTA_MAX_PRICE_IMPACT_PCT ?? 8);
+  const minAgeMs =
+    state.deltaMinRouteAgeMs ?? Number(process.env.DELTA_MIN_ROUTE_AGE_MS ?? 0);
   return {
     reply_markup: {
       inline_keyboard: [
-        [{ text: `🔍 Probe Size: ${probe} SOL`, callback_data: "SET_DELTA_PROBE" }],
-        [{ text: `📈 Min Improvement: ${minImprov}%`, callback_data: "SET_DELTA_IMPROV" }],
-        [{ text: `🛑 Max Impact: ${maxImpact}%`, callback_data: "SET_DELTA_IMPACT" }],
-        [{ text: `⏱ Min Route Age: ${minAgeMs} ms`, callback_data: "SET_DELTA_AGE" }],
+        [
+          {
+            text: `🔍 Probe Size: ${probe} SOL`,
+            callback_data: "SET_DELTA_PROBE",
+          },
+        ],
+        [
+          {
+            text: `📈 Min Improvement: ${minImprov}%`,
+            callback_data: "SET_DELTA_IMPROV",
+          },
+        ],
+        [
+          {
+            text: `🛑 Max Impact: ${maxImpact}%`,
+            callback_data: "SET_DELTA_IMPACT",
+          },
+        ],
+        [
+          {
+            text: `⏱ Min Route Age: ${minAgeMs} ms`,
+            callback_data: "SET_DELTA_AGE",
+          },
+        ],
         [{ text: "🔙 Back", callback_data: "AUTOMATION" }],
       ],
     },
@@ -117,9 +147,7 @@ export function buildLPSniperMenu() {
   return {
     reply_markup: {
       inline_keyboard: [
-        [
-          { text: "🎯 New LP Snipe", callback_data: "NEW_LP_SNIPE" },
-        ],
+        [{ text: "🎯 New LP Snipe", callback_data: "NEW_LP_SNIPE" }],
         [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
       ],
     },
@@ -223,13 +251,28 @@ export function buildTurboSolSettingsMenu(chatId) {
           },
         ],
         [
-          { text: `📈 Behavior Profiling ${state.enableBehaviorProfiling ? "ON" : "OFF"}` , callback_data: "TOGGLE_BEHAVIOR"},
+          {
+            text: `📈 Behavior Profiling ${
+              state.enableBehaviorProfiling ? "ON" : "OFF"
+            }`,
+            callback_data: "TOGGLE_BEHAVIOR",
+          },
         ],
         [
-          { text: `🕸 Multi-hop Correlation ${state.enableMultiHopCorrelation ? "ON" : "OFF"}` , callback_data: "TOGGLE_MULTIHOP"},
+          {
+            text: `🕸 Multi-hop Correlation ${
+              state.enableMultiHopCorrelation ? "ON" : "OFF"
+            }`,
+            callback_data: "TOGGLE_MULTIHOP",
+          },
         ],
         [
-          { text: `💰 Funding Path Analysis ${state.enableFundingPathAnalysis ? "ON" : "OFF"}` , callback_data: "TOGGLE_FUNDING"},
+          {
+            text: `💰 Funding Path Analysis ${
+              state.enableFundingPathAnalysis ? "ON" : "OFF"
+            }`,
+            callback_data: "TOGGLE_FUNDING",
+          },
         ],
         [
           { text: "🔙 Back", callback_data: "MAIN_MENU" },
@@ -404,15 +447,27 @@ export function buildRpcSettingsMenu(chatId) {
           { text: "📋 List Endpoints", callback_data: "LIST_RPCS" },
         ],
         [
-          { text: `Private Relay: ${relayOn}`.trim(), callback_data: "TOGGLE_RELAY" },
-          { text: `Strategy: ${strategy}`, callback_data: "CYCLE_RPC_STRATEGY" },
+          {
+            text: `Private Relay: ${relayOn}`.trim(),
+            callback_data: "TOGGLE_RELAY",
+          },
+          {
+            text: `Strategy: ${strategy}`,
+            callback_data: "CYCLE_RPC_STRATEGY",
+          },
         ],
         [
-          { text: `Relay Vendor: ${vendor}`.trim(), callback_data: "CYCLE_RELAY_VENDOR" },
+          {
+            text: `Relay Vendor: ${vendor}`.trim(),
+            callback_data: "CYCLE_RELAY_VENDOR",
+          },
           { text: "🔐 Set Relay API Key", callback_data: "SET_RELAY_API_KEY" },
         ],
         [
-          { text: "🌐 Set Relay Endpoint", callback_data: "SET_RELAY_ENDPOINT_URL" },
+          {
+            text: "🌐 Set Relay Endpoint",
+            callback_data: "SET_RELAY_ENDPOINT_URL",
+          },
         ],
         [
           { text: "⬅️ Back", callback_data: "SETTINGS" },
@@ -430,11 +485,16 @@ export function buildFeeSettingsMenu(chatId) {
   const feeLabel = dynamic != null ? `${globalFee} (dynamic)` : `${globalFee}`;
   const rows = [
     [
-      { text: `Global Priority Fee: ${feeLabel}`, callback_data: "SET_PRIORITY_FEE" },
+      {
+        text: `Global Priority Fee: ${feeLabel}`,
+        callback_data: "SET_PRIORITY_FEE",
+      },
     ],
   ];
   if (dynamic != null) {
-    rows.push([{ text: "Reset Tip Override", callback_data: "RESET_DYNAMIC_FEE" }]);
+    rows.push([
+      { text: "Reset Tip Override", callback_data: "RESET_DYNAMIC_FEE" },
+    ]);
   }
   rows.push([{ text: "🔙 Back to Settings", callback_data: "SETTINGS" }]);
   return {

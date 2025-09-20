@@ -1,24 +1,14 @@
 import axios from "axios";
 import { PublicKey, VersionedTransaction } from "@solana/web3.js";
-import {
-  getRpcConnection,
-  getParsedTokenAccountsByOwnerRaced,
-} from "../rpc.js";
+import { getRpcConnection, getParsedTokenAccountsByOwnerRaced } from "../rpc.js";
 import { getUserWalletInstance } from "../wallet.js";
-import { getAdaptivePriorityFee, computePriorityFeeCap } from "../fees.js";
 import { getPriorityFeeLamports, getUseJitoBundle } from "../config.js";
 import { simulateBundleAndSend } from "../jito.js";
-import { measureRpcLatency } from "../rpcMonitor.js";
 import { getAdaptiveSlippageBps, recordSlippageFeedback } from "../slippage.js";
 
+export const NATIVE_SOL = "So11111111111111111111111111111111111111112";
 const JUP_QUOTE_URL = "https://quote-api.jup.ag/v6/quote";
 const JUP_SWAP_URL = "https://quote-api.jup.ag/v6/swap";
-export const NATIVE_SOL = "So11111111111111111111111111111111111111112";
-
-// New: default shared accounts behavior is OFF to support Simple AMMs; can be enabled via env
-const defaultUseShared = ["1", "true", "yes"].includes(
-  String(process.env.JUP_USE_SHARED || "false").toLowerCase()
-);
 
 const mintDecimalsCache = new Map();
 
@@ -26,32 +16,34 @@ function promiseWithTimeout(promise, ms, tag = "timeout") {
   let to;
   return Promise.race([
     promise.finally(() => clearTimeout(to)),
-    new Promise((_, rej) => {
-      to = setTimeout(() => rej(new Error(tag)), ms);
-    }),
+    new Promise((_, rej) => (to = setTimeout(() => rej(new Error(tag)), ms))),
   ]);
 }
 
 async function getMintDecimals(mint, connection) {
   if (mint === NATIVE_SOL) return 9;
   if (mintDecimalsCache.has(mint)) return mintDecimalsCache.get(mint);
-  const info = await promiseWithTimeout(
-    connection.getParsedAccountInfo(new PublicKey(mint)).catch(() => null),
-    Number(process.env.MINT_INFO_TIMEOUT_MS || 1200),
-    "mint_info_timeout"
-  ).catch(() => null);
-  const dec = info?.value?.data?.parsed?.info?.decimals;
-  const decimals = Number.isFinite(dec) ? Number(dec) : 6;
-  mintDecimalsCache.set(mint, decimals);
-  return decimals;
+  try {
+    const info = await promiseWithTimeout(
+      connection.getParsedAccountInfo(new PublicKey(mint), {
+        commitment: "confirmed",
+      }),
+      Number(process.env.MINT_INFO_TIMEOUT_MS || 1200),
+      "mint_info_timeout"
+    ).catch(() => null);
+    const dec = info?.value?.data?.parsed?.info?.decimals;
+    const decimals = Number.isFinite(dec) ? Number(dec) : 6;
+    mintDecimalsCache.set(mint, decimals);
+    return decimals;
+  } catch {
+    return 6;
+  }
 }
 
 function deriveRouteLabels(route) {
   try {
     const rp = Array.isArray(route?.routePlan) ? route.routePlan : [];
-    const labels = rp
-      .map((s) => s?.swapInfo?.label || s?.swapInfo?.ammKey || "route")
-      .join(" > ");
+    const labels = rp.map((s) => s?.swapInfo?.label || s?.swapInfo?.ammKey || "route").join(" > ");
     return labels || "route";
   } catch {
     return "route";
@@ -84,421 +76,174 @@ export async function getQuoteRaw({
     timeoutMs,
     "quote_timeout"
   ).catch(() => null);
-  if (!res || res.status >= 400) return null;
+  if (!res) return null;
+  if (res.status >= 400) {
+    const data = res.data || {};
+    return { __error__: true, errorCode: data.errorCode || `HTTP_${res.status}`, errorMessage: data.error || "" };
+  }
   return res.data || null;
 }
 
-export async function getTokenQuote({
-  inputMint,
-  outputMint,
-  amountSol,
-  slippageBps = 100,
-}) {
-  const connection = getRpcConnection();
+export async function getTokenQuote({ inputMint, outputMint, amountSol, slippageBps = 100 }) {
   const amountRaw = Math.floor(Number(amountSol || 0) * 1e9);
-  const route = await getQuoteRaw({
-    inputMint,
-    outputMint,
-    amountRaw,
-    slippageBps,
-  }).catch(() => null);
-  if (!route) return null;
-  const outDecimals = await getMintDecimals(outputMint, connection).catch(
-    () => 6
-  );
-  const outAmount = Number(route.outAmount || 0);
-  const outAmountFormatted = outAmount / Math.pow(10, outDecimals);
-  return {
-    outAmountFormatted,
-    priceImpactPct: route.priceImpactPct,
-    route: { ...route, labels: deriveRouteLabels(route) },
-  };
-}
+  const baseTimeout = Number(process.env.QUOTE_TIMEOUT_MS || 1200);
+  const fallbackTimeout = Number(process.env.QUOTE_FALLBACK_TIMEOUT_MS || Math.max(2500, baseTimeout * 2));
+  const fallbackSlippageBps = Number(process.env.QUOTE_FALLBACK_SLIPPAGE_BPS || Math.max(300, slippageBps));
 
-async function requestSwapTransaction({
-  route,
-  userPublicKey,
-  priorityFeeMicroLamports,
-}) {
-  // Optional jitter on priority fee hint for builder
-  let hinted = priorityFeeMicroLamports;
-  const priceJitterPct = Math.max(0, Number(process.env.COMPUTE_UNIT_PRICE_JITTER_PCT || 0));
-  if (Number.isFinite(hinted) && hinted > 0 && priceJitterPct > 0) {
-    const sign = Math.random() < 0.5 ? -1 : 1;
-    const jitter = 1 + (sign * (Math.random() * priceJitterPct) / 100);
-    hinted = Math.max(1, Math.floor(hinted * jitter));
-  }
-
-  const buildBody = (overrides = {}) => {
-    const body = {
-      quoteResponse: route,
-      userPublicKey,
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-      useSharedAccounts: defaultUseShared,
-      asLegacyTransaction: false,
-      ...overrides,
-    };
-    if (
-      Number.isFinite(hinted) &&
-      hinted > 0 &&
-      overrides.computeUnitPriceMicroLamports !== null
-    ) {
-      body.computeUnitPriceMicroLamports = Math.floor(hinted);
+  const tryGet = async (bps, tmo, direct = false, amt = amountRaw) => {
+    let r = await getQuoteRaw({ inputMint, outputMint, amountRaw: amt, slippageBps: bps, timeoutMs: tmo, onlyDirectRoutes: direct }).catch(() => null);
+    if (r && r.__error__) {
+      // Avoid throwing here; callers expect null on failure
+      r = null;
     }
-    return body;
+    return r;
   };
 
-  const timeoutMs = Number(process.env.SWAP_BUILD_TIMEOUT_MS || 3000);
-
-  // Attempt 1: default body (useSharedAccounts per env, default OFF)
-  let res;
-  try {
-    res = await promiseWithTimeout(
-      axios.post(JUP_SWAP_URL, buildBody(), {
-        timeout: timeoutMs,
-        validateStatus: (s) => s >= 200 && s < 500,
-      }),
-      timeoutMs,
-      "swap_build_timeout"
-    );
-  } catch (e) {
-    throw e;
-  }
-
-  // If success
-  if (res && res.status < 400) {
-    const txb64 = res.data?.swapTransaction;
-    if (!txb64) throw new Error("no_swap_tx_returned");
-    return txb64;
-  }
-
-  // Attempt 2: retry with flipped useSharedAccounts (true <-> false)
-  let lastErrDetail = res?.data
-    ? typeof res.data === "string"
-      ? res.data
-      : JSON.stringify(res.data)
-    : "";
-  try {
-    const res2 = await promiseWithTimeout(
-      axios.post(
-        JUP_SWAP_URL,
-        buildBody({ useSharedAccounts: !defaultUseShared }),
-        {
-          timeout: timeoutMs,
-          validateStatus: (s) => s >= 200 && s < 500,
-        }
-      ),
-      timeoutMs,
-      "swap_build_timeout"
-    );
-    if (res2 && res2.status < 400) {
-      const txb64 = res2.data?.swapTransaction;
-      if (!txb64) throw new Error("no_swap_tx_returned");
-      return txb64;
-    }
-    lastErrDetail = res2?.data
-      ? typeof res2.data === "string"
-        ? res2.data
-        : JSON.stringify(res2.data)
-      : lastErrDetail;
-  } catch (_) {}
-
-  // Attempt 3: retry without priority fee field (keep flipped useSharedAccounts)
-  try {
-    const res3 = await promiseWithTimeout(
-      axios.post(
-        JUP_SWAP_URL,
-        buildBody({ useSharedAccounts: !defaultUseShared, computeUnitPriceMicroLamports: null }),
-        { timeout: timeoutMs, validateStatus: (s) => s >= 200 && s < 500 }
-      ),
-      timeoutMs,
-      "swap_build_timeout"
-    );
-    if (res3 && res3.status < 400) {
-      const txb64 = res3.data?.swapTransaction;
-      if (!txb64) throw new Error("no_swap_tx_returned");
-      return txb64;
-    }
-    lastErrDetail = res3?.data
-      ? typeof res3.data === "string"
-        ? res3.data
-        : JSON.stringify(res3.data)
-      : lastErrDetail;
-  } catch (_) {}
-
-  // All attempts failed
-  const code = res?.status || 400;
-  const errMsg = `swap_build_err_${code}${
-    lastErrDetail ? `:${lastErrDetail}` : ""
-  }`;
-  throw new Error(errMsg);
-}
-
-async function signAndBroadcast({
-  txBase64,
-  wallet,
-  useJitoBundle = false,
-  chatId,
-  priorityFeeMicroLamports,
-}) {
-  const raw = Buffer.from(txBase64, "base64");
-  const tx = VersionedTransaction.deserialize(raw);
-  tx.sign([wallet]);
-  // Delegate to centralized simulate + bundle + send flow with telemetry
-  return await simulateBundleAndSend({
-    signedTx: tx,
-    chatId,
-    useJitoBundle,
-    priorityFeeMicroLamports,
-  });
-}
-
-export async function performSwap({
-  inputMint,
-  outputMint,
-  amountSol,
-  amountRaw,
-  slippageBps = Number(process.env.DEFAULT_SLIPPAGE_BPS || 100),
-  priorityFeeLamports,
-  useJitoBundle,
-  chatId,
-}) {
-  const connection = getRpcConnection();
-  const wallet = await getUserWalletInstance(chatId);
-
-  let inAmountRaw = Number.isFinite(amountRaw)
-    ? Math.floor(amountRaw)
-    : Math.floor(Number(amountSol || 0) * 1e9);
-
-  // Optionally elevate slippage using adaptive heuristic when enabled
-  let slipBps = slippageBps;
-  try {
-    const flag = String(process.env.ADAPTIVE_SLIPPAGE_ENABLED || "").toLowerCase();
-    const enabled = flag === "1" || flag === "true" || flag === "yes";
-    if (enabled) {
-      const adaptive = await getAdaptiveSlippageBps().catch(() => null);
-      if (Number.isFinite(adaptive) && adaptive > 0) {
-        slipBps = Math.max(Number(slipBps) || 0, adaptive);
+  let route = await tryGet(slippageBps, baseTimeout);
+  if (!route) route = await tryGet(slippageBps, fallbackTimeout);
+  if (!route && fallbackSlippageBps > slippageBps) route = await tryGet(fallbackSlippageBps, fallbackTimeout);
+  if (!route) route = await tryGet(fallbackSlippageBps, fallbackTimeout, true);
+  if (!route) {
+    // Probe larger amounts quietly to detect liquidity thresholds, but don't throw
+    for (const mult of [1.5, 2.0]) {
+      const probe = Math.max(1, Math.floor(amountRaw * mult));
+      const rProbe = await tryGet(fallbackSlippageBps, fallbackTimeout, false, probe);
+      if (rProbe) {
+        // We found a route with a higher amount, but to keep existing UX, just return null and let UI handle amount input
+        break;
       }
     }
-  } catch {}
-
-  // Robust quote with fallback: retry with longer timeout and higher slippage if needed
-  const baseTimeout = Number(process.env.QUOTE_TIMEOUT_MS || 1200);
-  const fallbackTimeout = Number(
-    process.env.QUOTE_FALLBACK_TIMEOUT_MS || Math.max(2500, baseTimeout * 2)
-  );
-  const fallbackSlippageBps = Number(
-    process.env.QUOTE_FALLBACK_SLIPPAGE_BPS || Math.max(300, slipBps)
-  );
-
-  let route = await getQuoteRaw({
-    inputMint,
-    outputMint,
-    amountRaw: inAmountRaw,
-    slippageBps: slipBps,
-    timeoutMs: baseTimeout,
-  }).catch(() => null);
-
-  if (!route) {
-    // Retry with longer timeout
-    route = await getQuoteRaw({
-      inputMint,
-      outputMint,
-      amountRaw: inAmountRaw,
-      slippageBps: slipBps,
-      timeoutMs: fallbackTimeout,
-    }).catch(() => null);
   }
 
-  if (!route && fallbackSlippageBps > slipBps) {
-    // Retry with higher slippage and longer timeout
-    route = await getQuoteRaw({
-      inputMint,
-      outputMint,
-      amountRaw: inAmountRaw,
-      slippageBps: fallbackSlippageBps,
-      timeoutMs: fallbackTimeout,
-    }).catch(() => null);
-  }
+  if (!route) return null;
 
-  if (!route) {
-    // Last attempt: try only direct routes in case aggregator paths are unavailable
-    route = await getQuoteRaw({
-      inputMint,
-      outputMint,
-      amountRaw: inAmountRaw,
-      slippageBps: fallbackSlippageBps,
-      timeoutMs: fallbackTimeout,
-      onlyDirectRoutes: true,
-    }).catch(() => null);
-  }
+  // Shape response expected by telegram.js
+  const connection = getRpcConnection();
+  const outDec = await getMintDecimals(outputMint, connection).catch(() => 6);
+  const outAmountRaw = Number(route?.outAmount) || 0;
+  const outAmountFormatted = outDec > 0 ? outAmountRaw / 10 ** outDec : outAmountRaw;
 
+  return {
+    route,
+    outAmountRaw,
+    outAmountFormatted,
+    priceImpactPct: route?.priceImpactPct ?? null,
+  };
+}
+
+async function buildAndSignSwapTx({ route, userPk, priorityFeeLamports, chatId }) {
+  const body = {
+    quoteResponse: route,
+    userPublicKey: userPk,
+    wrapAndUnwrapSol: true,
+    dynamicComputeUnitLimit: true,
+    prioritizationFeeLamports: priorityFeeLamports ?? "auto",
+  };
+  const res = await axios.post(JUP_SWAP_URL, body, {
+    timeout: Number(process.env.SWAP_BUILD_TIMEOUT_MS || 5000),
+    validateStatus: (s) => s >= 200 && s < 500,
+  });
+  if (res.status >= 400) {
+    const msg = res?.data?.error || `swap_build_error_${res.status}`;
+    throw new Error(msg);
+  }
+  const swapTxB64 = res?.data?.swapTransaction;
+  if (!swapTxB64) throw new Error("no_swap_transaction");
+  const tx = VersionedTransaction.deserialize(Buffer.from(swapTxB64, "base64"));
+  return tx;
+}
+
+export async function performSwap({ inputMint, outputMint, amountSol, chatId, priorityFeeLamports, useJitoBundle }) {
+  if (!Number.isFinite(Number(amountSol)) || Number(amountSol) <= 0) throw new Error("invalid_amount");
+  const connection = getRpcConnection();
+  const wallet = await getUserWalletInstance(chatId);
+  const slippageBps = await getAdaptiveSlippageBps().catch(() => Number(process.env.DEFAULT_SLIPPAGE_BPS || 100));
+
+  const quoteRes = await getTokenQuote({ inputMint, outputMint, amountSol, slippageBps });
+  const route = quoteRes?.route || null;
   if (!route) throw new Error("no_quote_route");
 
-  let prio = priorityFeeLamports;
-  if (!Number.isFinite(prio) || prio <= 0) {
-    try {
-      prio = getPriorityFeeLamports();
-    } catch {}
-  }
-  if (!Number.isFinite(prio) || prio <= 0) {
-    try {
-      prio = await getAdaptivePriorityFee(connection);
-    } catch {}
-  }
-  // Apply dynamic congestion-based cap
-  try {
-    const latencyForCap = await measureRpcLatency().catch(() => -1);
-    const cap = computePriorityFeeCap(latencyForCap);
-    if (Number.isFinite(prio) && prio > 0) {
-      prio = Math.min(prio, cap);
-    } else {
-      prio = cap;
-    }
-  } catch {}
-
-  let txb64;
-  try {
-    txb64 = await requestSwapTransaction({
-      route,
-      userPublicKey: wallet.publicKey.toBase58(),
-      priorityFeeMicroLamports: prio,
-    });
-  } catch (e1) {
-    // Re-quote and retry once (route might have expired or changed)
-    route = await getQuoteRaw({
-      inputMint,
-      outputMint,
-      amountRaw: inAmountRaw,
-      slippageBps: slipBps,
-    }).catch(() => null);
-    if (!route) throw e1;
-    try {
-      txb64 = await requestSwapTransaction({
-        route,
-        userPublicKey: wallet.publicKey.toBase58(),
-        priorityFeeMicroLamports: prio,
-      });
-    } catch (e2) {
-      // Final attempt: retry with no priority fee hint
-      txb64 = await requestSwapTransaction({
-        route,
-        userPublicKey: wallet.publicKey.toBase58(),
-        priorityFeeMicroLamports: undefined,
-      });
-    }
-  }
+  const tx = await buildAndSignSwapTx({ route, userPk: wallet.publicKey.toBase58(), priorityFeeLamports, chatId });
+  tx.sign([wallet]);
 
   let sendRes;
   try {
-    sendRes = await signAndBroadcast({
-      txBase64: txb64,
-      wallet,
-      useJitoBundle: useJitoBundle ?? getUseJitoBundle(),
-      chatId,
-      priorityFeeMicroLamports: prio,
-    });
-    // Feedback: success case
-    try {
-      recordSlippageFeedback({
-        usedBps: slipBps,
-        priceImpactPct: route?.priceImpactPct,
-        success: true,
-        latencyMs: sendRes?.latencyMs,
-      });
-    } catch {}
+    sendRes = await simulateBundleAndSend({ signedTx: tx, chatId, useJitoBundle: useJitoBundle ?? getUseJitoBundle(), priorityFeeMicroLamports: null });
   } catch (e) {
-    // Feedback: failure case (send path failed)
-    try {
-      recordSlippageFeedback({
-        usedBps: slipBps,
-        priceImpactPct: route?.priceImpactPct,
-        success: false,
-        latencyMs: null,
-      });
-    } catch {}
+    try { recordSlippageFeedback({ usedBps: slippageBps, priceImpactPct: route?.priceImpactPct, success: false, latencyMs: null }); } catch {}
     throw e;
   }
+  try { recordSlippageFeedback({ usedBps: slippageBps, priceImpactPct: route?.priceImpactPct, success: true, latencyMs: sendRes?.latencyMs }); } catch {}
 
-  const outDecimals = await getMintDecimals(outputMint, connection).catch(
-    () => 6
-  );
-  const tokensOut = Number(route.outAmount || 0) / Math.pow(10, outDecimals);
+  const outDec = await getMintDecimals(outputMint, connection).catch(() => 6);
+  const tokensOut = Number(route?.outAmount) ? Number(route.outAmount) / 10 ** outDec : null;
 
   return {
-    txid: sendRes.txid,
-    output: { symbol: undefined, tokensOut },
-    route: {
-      priceImpactPct: route.priceImpactPct,
-      labels: deriveRouteLabels(route),
-      outAmount: route.outAmount,
-    },
-    slippageBps: slipBps,
-    priorityFeeLamports: prio,
-    via: sendRes.via,
-    latencyMs: sendRes.latencyMs,
-    lastSendRaceWinner: sendRes.lastSendRaceWinner,
-    lastSendRaceAttempts: sendRes.lastSendRaceAttempts,
-    lastSendRaceLatencyMs: sendRes.lastSendRaceLatencyMs,
+    txid: sendRes?.txid || null,
+    route: { labels: deriveRouteLabels(route), priceImpactPct: route?.priceImpactPct ?? null },
+    slippageBps,
+    priorityFeeLamports: priorityFeeLamports ?? "auto",
+    via: sendRes?.via || null,
+    latencyMs: sendRes?.latencyMs ?? null,
+    lastSendRaceWinner: sendRes?.lastSendRaceWinner ?? null,
+    lastSendRaceAttempts: sendRes?.lastSendRaceAttempts ?? 0,
+    lastSendRaceLatencyMs: sendRes?.lastSendRaceLatencyMs ?? null,
+    output: { tokensOut, symbol: null },
   };
 }
 
-export async function performSell({
-  tokenMint,
-  percent = 100,
-  slippageBps = 150,
-  priorityFeeLamports,
-  useJitoBundle,
-  chatId,
-}) {
+export async function quickSell({ tokenMint, percent = 100, chatId, priorityFeeLamports, useJitoBundle, slippageBps: slippageBpsOverride }) {
   const connection = getRpcConnection();
   const wallet = await getUserWalletInstance(chatId);
-  const owner = wallet.publicKey;
-  const accounts = await promiseWithTimeout(
-    getParsedTokenAccountsByOwnerRaced(owner, {
-      mint: new PublicKey(tokenMint),
-    }).catch(() => ({ value: [] })),
-    Number(process.env.TOKEN_ACCOUNTS_TIMEOUT_MS || 1500),
-    "token_acc_timeout"
-  ).catch(() => ({ value: [] }));
-  const acc = accounts?.value?.[0];
-  const info = acc?.account?.data?.parsed?.info;
-  const uiAmt = Number(info?.tokenAmount?.uiAmount || 0);
-  const dec = Number(info?.tokenAmount?.decimals || 6);
-  if (uiAmt <= 0) throw new Error("no_tokens_to_sell");
-  const toSellUi = (uiAmt * Math.max(1, Math.min(100, percent))) / 100;
-  const inAmountRaw = Math.floor(toSellUi * Math.pow(10, dec));
-  return await performSwap({
-    inputMint: tokenMint,
-    outputMint: NATIVE_SOL,
-    amountRaw: inAmountRaw,
+
+  // Fetch token balance (sum across accounts of this mint)
+  const resp = await getParsedTokenAccountsByOwnerRaced(
+    wallet.publicKey,
+    { mint: new PublicKey(tokenMint) },
+    { commitment: "confirmed" }
+  ).catch(() => null);
+  const accounts = resp?.value || [];
+  let rawBalance = 0n;
+  for (const acc of accounts) {
+    const amtStr = acc?.account?.data?.parsed?.info?.tokenAmount?.amount;
+    if (amtStr) rawBalance += BigInt(amtStr);
+  }
+  if (rawBalance <= 0n) throw new Error("no_token_balance");
+  const sellRaw = (rawBalance * BigInt(Math.max(1, Math.min(100, Math.floor(percent))))) / 100n;
+  if (sellRaw <= 0n) throw new Error("sell_amount_zero");
+
+  const slippageBps = Number.isFinite(Number(slippageBpsOverride))
+    ? Number(slippageBpsOverride)
+    : await getAdaptiveSlippageBps().catch(() => Number(process.env.DEFAULT_SLIPPAGE_BPS || 100));
+  const route = await getQuoteRaw({ inputMint: tokenMint, outputMint: NATIVE_SOL, amountRaw: Number(sellRaw), slippageBps }).catch(() => null);
+  if (!route) throw new Error("no_quote_route");
+
+  const tx = await buildAndSignSwapTx({ route, userPk: wallet.publicKey.toBase58(), priorityFeeLamports, chatId });
+  tx.sign([wallet]);
+
+  let sendRes;
+  try {
+    sendRes = await simulateBundleAndSend({ signedTx: tx, chatId, useJitoBundle: useJitoBundle ?? getUseJitoBundle(), priorityFeeMicroLamports: null });
+  } catch (e) {
+    try { recordSlippageFeedback({ usedBps: slippageBps, priceImpactPct: route?.priceImpactPct, success: false, latencyMs: null }); } catch {}
+    throw e;
+  }
+  try { recordSlippageFeedback({ usedBps: slippageBps, priceImpactPct: route?.priceImpactPct, success: true, latencyMs: sendRes?.latencyMs }); } catch {}
+
+  const tokensOut = Number(route?.outAmount) ? Number(route.outAmount) / 1e9 : null;
+
+  return {
+    txid: sendRes?.txid || null,
+    route: { labels: deriveRouteLabels(route), priceImpactPct: route?.priceImpactPct ?? null },
     slippageBps,
-    priorityFeeLamports,
-    useJitoBundle,
-    chatId,
-  });
+    priorityFeeLamports: priorityFeeLamports ?? "auto",
+    via: sendRes?.via || null,
+    latencyMs: sendRes?.latencyMs ?? null,
+    lastSendRaceWinner: sendRes?.lastSendRaceWinner ?? null,
+    lastSendRaceAttempts: sendRes?.lastSendRaceAttempts ?? 0,
+    lastSendRaceLatencyMs: sendRes?.lastSendRaceLatencyMs ?? null,
+    output: { tokensOut, symbol: "SOL" },
+  };
 }
 
-// Quick-sell convenience wrapper with aggressive defaults for speed
-export async function quickSell({
-  tokenMint,
-  percent = 100,
-  slippageBps,
-  priorityFeeLamports,
-  useJitoBundle,
-  chatId,
-}) {
-  const defaultSellSlippage = Number(
-    slippageBps ?? process.env.QUICK_SELL_SLIPPAGE_BPS ?? 200
-  );
-  return performSell({
-    tokenMint,
-    percent,
-    slippageBps: defaultSellSlippage,
-    priorityFeeLamports,
-    useJitoBundle,
-    chatId,
-  });
-}
+export const performSell = quickSell;

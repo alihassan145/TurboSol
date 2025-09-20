@@ -17,7 +17,7 @@ const TOKEN_META_TTL_MS = Number(process.env.TOKEN_META_TTL_MS || 3600_000);
 const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqUfnv3V9xRpxo3cLZg1VbG7sWXeDaD7B";
 
-async function getTokenMeta(mint) {
+export async function getTokenMeta(mint) {
   const now = Date.now();
   const cached = _tokenMetaCache.get(mint);
   if (cached && now - cached.ts < TOKEN_META_TTL_MS)

@@ -58,7 +58,9 @@ class AlphaDetection extends EventEmitter {
     if (this.pumpInterval) clearInterval(this.pumpInterval);
     if (this.mempoolInterval) clearInterval(this.mempoolInterval);
     // Stop PumpPortal WS if running
-    try { this.pumpPortal?.stop?.(); } catch {}
+    try {
+      this.pumpPortal?.stop?.();
+    } catch {}
     this.pumpPortal = null;
     console.log("🎯 Alpha detection layer stopped");
   }
@@ -84,10 +86,14 @@ class AlphaDetection extends EventEmitter {
   startPumpListener() {
     try {
       if (this.pumpPortal) {
-        try { this.pumpPortal.stop(); } catch {}
+        try {
+          this.pumpPortal.stop();
+        } catch {}
         this.pumpPortal = null;
       }
-      this.pumpPortal = new PumpPortalListener({ apiKey: process.env.PUMPPORTAL_API_KEY });
+      this.pumpPortal = new PumpPortalListener({
+        apiKey: process.env.PUMPPORTAL_API_KEY,
+      });
       this.pumpPortal.on("new_launch", (coin) => {
         try {
           const payload = {
@@ -100,16 +106,26 @@ class AlphaDetection extends EventEmitter {
           };
           if (!payload.mint) return;
           this.emit("pump_launch", payload);
-          try { alphaBus.emit("pump_launch", payload); } catch {}
+          try {
+            alphaBus.emit("pump_launch", payload);
+          } catch {}
           if (payload.creator && this.devWallets.has(payload.creator)) {
-            const knownPayload = { mint: payload.mint, creator: payload.creator, type: "pump_fun" };
+            const knownPayload = {
+              mint: payload.mint,
+              creator: payload.creator,
+              type: "pump_fun",
+            };
             this.emit("known_dev_launch", knownPayload);
-            try { alphaBus.emit("known_dev_launch", knownPayload); } catch {}
+            try {
+              alphaBus.emit("known_dev_launch", knownPayload);
+            } catch {}
           }
         } catch {}
       });
       this.pumpPortal.start();
-      console.log("🔌 PumpPortal WebSocket listener started for Pump.fun launches");
+      console.log(
+        "🔌 PumpPortal WebSocket listener started for Pump.fun launches"
+      );
     } catch (e) {
       console.error("❌ Failed to start PumpPortal listener:", e?.message || e);
       // Optional: fallback to previous HTTP polling (disabled by default)
@@ -164,21 +180,21 @@ class AlphaDetection extends EventEmitter {
             }
           }
         }
-         if (tx && this.isTokenCreation(tx)) {
-           const mint = this.extractMintFromTx(tx);
-           if (mint) {
-             const payload = {
-               address: address,
-               mint: mint,
-               type: "token_creation",
-               timestamp: Date.now(),
-             };
-             this.emit("dev_wallet_activity", payload);
-             try {
-               alphaBus.emit("dev_wallet_activity", payload);
-             } catch {}
-           }
-         }
+        if (tx && this.isTokenCreation(tx)) {
+          const mint = this.extractMintFromTx(tx);
+          if (mint) {
+            const payload = {
+              address: address,
+              mint: mint,
+              type: "token_creation",
+              timestamp: Date.now(),
+            };
+            this.emit("dev_wallet_activity", payload);
+            try {
+              alphaBus.emit("dev_wallet_activity", payload);
+            } catch {}
+          }
+        }
       }
     } catch (error) {
       console.error("❌ Dev wallet monitor error:", error.message);
@@ -325,8 +341,8 @@ class AlphaDetection extends EventEmitter {
           }
         }
         if (tx) {
-           // Look for funding patterns
-           const funding = this.analyzeFunding(tx);
+          // Look for funding patterns
+          const funding = this.analyzeFunding(tx);
           if (funding) {
             correlation.fundingPaths.push(funding);
           }

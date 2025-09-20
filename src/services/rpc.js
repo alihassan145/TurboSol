@@ -105,7 +105,7 @@ async function planOrderedEndpoints(endpoints = []) {
   const measured = await measureEndpointsLatency(endpoints).catch(() => []);
   const scored = measured.map((m) => {
     const url = m.url;
-    const lat = (m.latencyMs ?? m.latency ?? Number.MAX_SAFE_INTEGER);
+    const lat = m.latencyMs ?? m.latency ?? Number.MAX_SAFE_INTEGER;
     const s = getStats(url);
     updateMeasuredLatency(url, lat);
     let score = lat;
@@ -128,13 +128,17 @@ let lastRotationReason = null;
 
 export function initializeRpc() {
   if (rpcEndpoints.length) return;
-  const rawList =
-    (process.env.RPC_HTTP_ENDPOINTS || process.env.SOLANA_RPC_URLS || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+  const rawList = (
+    process.env.RPC_HTTP_ENDPOINTS ||
+    process.env.SOLANA_RPC_URLS ||
+    ""
+  )
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
   if (!rawList.length) {
-    const single = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
+    const single =
+      process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
     rpcEndpoints = [single];
   } else {
     rpcEndpoints = rawList;
@@ -202,7 +206,12 @@ export async function sendTransactionRaced(
     try {
       const result = await submitToPrivateRelay(raw);
       if (result.success && result.signature) {
-        recordPriorityFeeFeedback({ fee: null, success: true, latencyMs: nowMs() - t0, via: "private_relay" });
+        recordPriorityFeeFeedback({
+          fee: null,
+          success: true,
+          latencyMs: nowMs() - t0,
+          via: "private_relay",
+        });
         return result.signature;
       }
       // If relay returns non-success, fall through to RPC with context
@@ -255,7 +264,12 @@ export async function sendTransactionRaced(
             winnerSet = true;
             recordRaceWin(url, nowMs() - t0, attemptsCount, "send");
           }
-          recordPriorityFeeFeedback({ fee: null, success: true, latencyMs: nowMs() - t0, via: `rpc:${url}` });
+          recordPriorityFeeFeedback({
+            fee: null,
+            success: true,
+            latencyMs: nowMs() - t0,
+            via: `rpc:${url}`,
+          });
           return sig;
         } catch (e) {
           recordFailure(url);
@@ -278,13 +292,19 @@ export async function sendTransactionRaced(
   const dt = nowMs() - t0;
   const err = lastError || new Error("All RPC broadcasts failed");
   err.meta = { source: "rpc_race", sendLatencyMs: dt };
-  recordPriorityFeeFeedback({ fee: null, success: false, latencyMs: dt, via: "rpc_race" });
+  recordPriorityFeeFeedback({
+    fee: null,
+    success: false,
+    latencyMs: dt,
+    via: "rpc_race",
+  });
   throw err;
 }
 
 export async function submitToPrivateRelay(serializedTx, options = {}) {
   // pull dynamic values from config so Telegram UI updates take effect without restart
-  const { getPrivateRelayEndpoint, getPrivateRelayApiKey, getRelayVendor } = await import("./config.js");
+  const { getPrivateRelayEndpoint, getPrivateRelayApiKey, getRelayVendor } =
+    await import("./config.js");
   // Prefer environment variables if present to support test/runtime overrides
   const relay = process.env.PRIVATE_RELAY_ENDPOINT || getPrivateRelayEndpoint();
   if (!relay) throw new Error("relay_not_configured");
@@ -292,7 +312,11 @@ export async function submitToPrivateRelay(serializedTx, options = {}) {
   const apiKey = process.env.PRIVATE_RELAY_API_KEY || getPrivateRelayApiKey();
   const endpoint = relay;
   const prefer = (process.env.PRIVATE_RELAY_PREFER || "").toLowerCase();
-  const vendor = (process.env.PRIVATE_RELAY_VENDOR || getRelayVendor?.() || "auto").toLowerCase();
+  const vendor = (
+    process.env.PRIVATE_RELAY_VENDOR ||
+    getRelayVendor?.() ||
+    "auto"
+  ).toLowerCase();
 
   // Explicit vendor selection takes precedence
   if (vendor === "jito") {
@@ -309,7 +333,10 @@ export async function submitToPrivateRelay(serializedTx, options = {}) {
   } else if (vendor === "flashbots") {
     return submitToFlashbots(txBase64, apiKey, endpoint);
   } else if (vendor === "generic") {
-    const res = await axios.post(endpoint, { txBase64, options: options || {} });
+    const res = await axios.post(endpoint, {
+      txBase64,
+      options: options || {},
+    });
     return res.data || { success: false };
   }
 
@@ -342,7 +369,12 @@ async function submitToBloxRoute(txBase64, apiKey, endpoint) {
       { headers }
     );
     const d = res?.data || {};
-    const signature = d.txHash || d.signature || d?.result?.txHash || d?.result?.signature || null;
+    const signature =
+      d.txHash ||
+      d.signature ||
+      d?.result?.txHash ||
+      d?.result?.signature ||
+      null;
     const ok = !!signature || d.ok === true || d.status === "ok";
     return { success: ok, signature };
   } catch (e) {
@@ -389,8 +421,14 @@ function computeBestEndpointFromMeasurements(measuredList) {
     .sort((a, b) => a.latencyMs - b.latencyMs);
   if (!sorted.length) return null;
   const latencies = sorted.map((x) => x.latencyMs);
-  const p50 = percentile(latencies.slice().sort((a, b) => a - b), 0.5);
-  const p95 = percentile(latencies.slice().sort((a, b) => a - b), 0.95);
+  const p50 = percentile(
+    latencies.slice().sort((a, b) => a - b),
+    0.5
+  );
+  const p95 = percentile(
+    latencies.slice().sort((a, b) => a - b),
+    0.95
+  );
   return { best: sorted[0].url, p50, p95 };
 }
 
@@ -644,7 +682,12 @@ export async function getSignaturesForAddressRaced(
 
 export async function getTransactionRaced(
   signature,
-  { commitment = "confirmed", maxSupportedTransactionVersion = 0, microBatch, callImpl } = {}
+  {
+    commitment = "confirmed",
+    maxSupportedTransactionVersion = 0,
+    microBatch,
+    callImpl,
+  } = {}
 ) {
   return raceReadAcrossEndpoints({
     microBatch: microBatch || getDefaultReadMicroBatch(),

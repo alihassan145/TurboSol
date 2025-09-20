@@ -38,6 +38,7 @@ import {
   getWalletInfo,
   shortenAddress,
   getWalletSellTokens,
+  getTokenMeta,
 } from "./walletInfo.js";
 import {
   buildTurboSolMainMenu,
@@ -756,9 +757,17 @@ export async function startTelegramBot() {
           const state = getUserState(chatId);
           const defaultBuy = state.defaultBuySol ?? 0.05;
           setPendingInput(chatId, { type: "QUOTE_AMOUNT", tokenAddress: mint });
+          // Enrich with token name/symbol for prompt
+          let tokenNameSym = mint;
+          try {
+            const meta = await getTokenMeta(mint);
+            const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
+            const name = meta?.name ? String(meta.name).slice(0, 20) : null;
+            if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
+          } catch {}
           await bot.sendMessage(
             chatId,
-            `💰 Quote - ${mint}\n\nEnter amount in SOL to quote (default: ${defaultBuy} SOL):`
+            `💰 Quote - ${tokenNameSym}\n\nEnter amount in SOL to quote (default: ${defaultBuy} SOL):`
           );
         } catch (e) {
           await bot.sendMessage(
@@ -794,9 +803,17 @@ export async function startTelegramBot() {
             return;
           }
 
+          // Enrich with token name/symbol
+          let tokenNameSym = mint;
+          try {
+            const meta = await getTokenMeta(mint);
+            const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
+            const name = meta?.name ? String(meta.name).slice(0, 20) : null;
+            if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
+          } catch {}
           await bot.sendMessage(
             chatId,
-            `Quote for ${amountSol} SOL -> ${mint}: ${res.outAmountFormatted} tokens (impact ${res.priceImpactPct}%)`,
+            `Quote for ${amountSol} SOL -> ${tokenNameSym}: ${res.outAmountFormatted} tokens (impact ${res.priceImpactPct}%)`,
             {
               reply_markup: {
                 inline_keyboard: [
@@ -1337,9 +1354,17 @@ export async function startTelegramBot() {
         const st = getUserState(chatId);
         const last = Number(st?.lastAmounts?.[mint] || st?.defaultBuySol || 0.05);
         setPendingInput(chatId, { type: "QUOTE_AMOUNT", tokenAddress: mint });
+        // Enrich with token meta for header
+        let tokenNameSym = mint;
+        try {
+          const meta = await getTokenMeta(mint);
+          const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
+          const name = meta?.name ? String(meta.name).slice(0, 20) : null;
+          if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
+        } catch {}
         await bot.sendMessage(
           chatId,
-          `💰 Quote - ${mint}\n\nEnter amount in SOL to quote (last: ${last} SOL):`
+          `💰 Quote - ${tokenNameSym}\n\nEnter amount in SOL to quote (last: ${last} SOL):`
         );
         return;
       }
@@ -1927,9 +1952,17 @@ export async function startTelegramBot() {
                 ? res.outAmountFormatted
                 : Number(res?.outAmountFormatted || 0);
             const outStr = Number.isFinite(out) ? out.toFixed(6) : "?";
+            // Enrich with token name/symbol
+            let tokenNameSym = outputMint;
+            try {
+              const meta = await getTokenMeta(outputMint);
+              const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
+              const name = meta?.name ? String(meta.name).slice(0, 20) : null;
+              if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
+            } catch {}
             await bot.sendMessage(
               chatId,
-              `Quote for ${amountSol} SOL -> ${outputMint}: ${outStr} tokens (impact ${impact})`,
+              `Quote for ${amountSol} SOL -> ${tokenNameSym}: ${outStr} tokens (impact ${impact})`,
               {
                 reply_markup: {
                   inline_keyboard: [
@@ -2430,7 +2463,13 @@ export async function startTelegramBot() {
               });
             } else {
               const msg = String(e?.message || "");
-              if (msg.includes("no_quote_route")) {
+              if (msg.includes("no_quote_route_suggest:")) {
+                const suggested = msg.split(":")[1];
+                await bot.sendMessage(
+                  chatId,
+                  `❌ No swap route at ${amountSol} SOL. A route may be available around ~${suggested} SOL.\n• I already retried with higher slippage and longer timeout.\n• Try the suggested size, or wait a few seconds and retry.\n• You can also raise slippage in Settings > Trading Tools.`
+                );
+              } else if (msg.includes("no_quote_route")) {
                 await bot.sendMessage(
                   chatId,
                   "❌ No swap route available right now.\n• The token may not have liquidity yet or routing is saturated.\n• I retried with higher slippage and a longer quote timeout automatically.\n• Try again in a few seconds, increase slippage in Settings > Trading Tools, or wait for LP to initialize."
@@ -2725,9 +2764,17 @@ export async function startTelegramBot() {
             tokenAddress: normalizedMint,
           });
           const defaultBuy = state.defaultBuySol ?? 0.05;
+          // Enrich with token meta for header
+          let tokenNameSym = normalizedMint;
+          try {
+            const meta = await getTokenMeta(normalizedMint);
+            const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
+            const name = meta?.name ? String(meta.name).slice(0, 20) : null;
+            if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
+          } catch {}
           await bot.sendMessage(
             chatId,
-            `💰 Quote - ${normalizedMint}\n\nEnter amount in SOL to quote (default: ${defaultBuy} SOL):`
+            `💰 Quote - ${tokenNameSym}\n\nEnter amount in SOL to quote (default: ${defaultBuy} SOL):`
           );
         } catch (e) {
           await bot.sendMessage(
@@ -2771,9 +2818,17 @@ export async function startTelegramBot() {
               ? res.outAmountFormatted
               : Number(res?.outAmountFormatted || 0);
           const outStr = Number.isFinite(out) ? out.toFixed(6) : "?";
+          // Enrich with token name/symbol
+          let tokenNameSym = tokenAddress;
+          try {
+            const meta = await getTokenMeta(tokenAddress);
+            const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
+            const name = meta?.name ? String(meta.name).slice(0, 20) : null;
+            if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
+          } catch {}
           await bot.sendMessage(
             chatId,
-            `Quote for ${amountSol} SOL -> ${tokenAddress}: ${outStr} tokens (impact ${impact})`,
+            `Quote for ${amountSol} SOL -> ${tokenNameSym}: ${outStr} tokens (impact ${impact})`,
             {
               reply_markup: {
                 inline_keyboard: [
