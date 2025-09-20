@@ -49,12 +49,14 @@ export function getUserState(chatId) {
       snipeRetryCount: 3, // Number of retry attempts on failed snipe
       // New automation toggles
       preLPWatchEnabled: false,
-      liqDeltaEnabled: (String(process.env.LIQ_DELTA_ENABLED || "true").toLowerCase() !== "false"),
+      liqDeltaEnabled:
+        String(process.env.LIQ_DELTA_ENABLED || "true").toLowerCase() !==
+        "false",
       // Per-chat overrides for Liquidity Delta heuristic (null => use ENV defaults)
-      liqDeltaProbeSol: null,           // e.g., 0.1 SOL probe size
-      liqDeltaMinImprovPct: null,       // e.g., require >= X% improvement between probes
-      deltaMaxPriceImpactPct: null,     // e.g., cap entry if price impact > X%
-      deltaMinRouteAgeMs: null,         // e.g., require route age >= X ms before entry
+      liqDeltaProbeSol: null, // e.g., 0.1 SOL probe size
+      liqDeltaMinImprovPct: null, // e.g., require >= X% improvement between probes
+      deltaMaxPriceImpactPct: null, // e.g., cap entry if price impact > X%
+      deltaMinRouteAgeMs: null, // e.g., require route age >= X ms before entry
       // Scaling: wallet tiering and spend caps
       tier: "basic",
       tierCaps: { basic: 1, plus: 3, pro: 10 }, // daily SOL cap per tier
@@ -202,12 +204,24 @@ export function addCopyTradeWallet(chatId, wallet) {
     copyBuy: wallet?.copyBuy !== false,
     copySell: wallet?.copySell !== false,
     mode: wallet?.mode || "fixed", // fixed | percent
-    amountSOL: Number.isFinite(Number(wallet?.amountSOL)) ? Number(wallet.amountSOL) : 0.05,
-    percent: Number.isFinite(Number(wallet?.percent)) ? Number(wallet.percent) : 10,
-    perTradeCapSOL: Number.isFinite(Number(wallet?.perTradeCapSOL)) ? Number(wallet.perTradeCapSOL) : null,
-    dailyCapSOL: Number.isFinite(Number(wallet?.dailyCapSOL)) ? Number(wallet.dailyCapSOL) : null,
-    slippageBps: Number.isFinite(Number(wallet?.slippageBps)) ? Number(wallet.slippageBps) : null,
-    maxConcurrent: Number.isFinite(Number(wallet?.maxConcurrent)) ? Number(wallet.maxConcurrent) : null,
+    amountSOL: Number.isFinite(Number(wallet?.amountSOL))
+      ? Number(wallet.amountSOL)
+      : 0.05,
+    percent: Number.isFinite(Number(wallet?.percent))
+      ? Number(wallet.percent)
+      : 10,
+    perTradeCapSOL: Number.isFinite(Number(wallet?.perTradeCapSOL))
+      ? Number(wallet.perTradeCapSOL)
+      : null,
+    dailyCapSOL: Number.isFinite(Number(wallet?.dailyCapSOL))
+      ? Number(wallet.dailyCapSOL)
+      : null,
+    slippageBps: Number.isFinite(Number(wallet?.slippageBps))
+      ? Number(wallet.slippageBps)
+      : null,
+    maxConcurrent: Number.isFinite(Number(wallet?.maxConcurrent))
+      ? Number(wallet.maxConcurrent)
+      : null,
     addedAt: Date.now(),
   };
   ct.followedWallets.push(entry);
@@ -215,7 +229,9 @@ export function addCopyTradeWallet(chatId, wallet) {
 
 export function removeCopyTradeWallet(chatId, address) {
   const ct = getCopyTradeState(chatId);
-  ct.followedWallets = (ct.followedWallets || []).filter((w) => w.address !== address);
+  ct.followedWallets = (ct.followedWallets || []).filter(
+    (w) => w.address !== address
+  );
 }
 
 export function updateCopyTradeWallet(chatId, address, patch = {}) {

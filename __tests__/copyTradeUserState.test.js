@@ -1,4 +1,8 @@
-import { getUserState, getCopyTradeState, addCopyTradeWallet } from "../src/services/userState.js";
+import {
+  getUserState,
+  getCopyTradeState,
+  addCopyTradeWallet,
+} from "../src/services/userState.js";
 
 describe("copyTrade userState defaults", () => {
   test("getUserState initializes copyTrade defaults", () => {
@@ -12,7 +16,9 @@ describe("copyTrade userState defaults", () => {
 
   test("addCopyTradeWallet normalizes fields with sensible defaults", () => {
     const chatId = 23456;
-    addCopyTradeWallet(chatId, { address: "7YFhSg3m4mH4qVQ9fXWm8kP7J7mQw3v7bSgG3kUYt9uQ" });
+    addCopyTradeWallet(chatId, {
+      address: "7YFhSg3m4mH4qVQ9fXWm8kP7J7mQw3v7bSgG3kUYt9uQ",
+    });
     const ct = getCopyTradeState(chatId);
     expect(ct.followedWallets.length).toBe(1);
     const w = ct.followedWallets[0];
@@ -25,9 +31,17 @@ describe("copyTrade userState defaults", () => {
     expect(typeof w.percent).toBe("number");
     expect(w.percent).toBeGreaterThan(0);
     // optional caps default to null
-    expect(w.perTradeCapSOL === null || typeof w.perTradeCapSOL === "number").toBe(true);
-    expect(w.dailyCapSOL === null || typeof w.dailyCapSOL === "number").toBe(true);
-    expect(w.slippageBps === null || typeof w.slippageBps === "number").toBe(true);
-    expect(w.maxConcurrent === null || typeof w.maxConcurrent === "number").toBe(true);
+    expect(
+      w.perTradeCapSOL === null || typeof w.perTradeCapSOL === "number"
+    ).toBe(true);
+    expect(w.dailyCapSOL === null || typeof w.dailyCapSOL === "number").toBe(
+      true
+    );
+    expect(w.slippageBps === null || typeof w.slippageBps === "number").toBe(
+      true
+    );
+    expect(
+      w.maxConcurrent === null || typeof w.maxConcurrent === "number"
+    ).toBe(true);
   });
 });

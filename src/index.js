@@ -29,10 +29,14 @@ async function main() {
   await startDashboardServer();
 
   // Start RPC health/latency monitoring loop
-  startRpcHealthLoop({ intervalMs: Number(process.env.RPC_HEALTH_INTERVAL_MS || 3000) });
+  startRpcHealthLoop({
+    intervalMs: Number(process.env.RPC_HEALTH_INTERVAL_MS || 3000),
+  });
 
   // Start dynamic priority fee refresher (learned tip model)
-  startPriorityFeeRefresher({ intervalMs: Number(process.env.PRIORITY_FEE_REFRESH_MS || 1500) });
+  startPriorityFeeRefresher({
+    intervalMs: Number(process.env.PRIORITY_FEE_REFRESH_MS || 1500),
+  });
 
   // Start Copy-Trade monitors per user
   try {
@@ -56,9 +60,17 @@ async function main() {
       // Persist signal telemetry once centrally
       for (const [chatId, state] of getAllUserStates()) {
         // Gate by user settings and wallet availability
-        const gating = (state?.autoSnipeOnPaste === true) && true;
+        const gating = state?.autoSnipeOnPaste === true && true;
         if (!gating) continue;
-        addTradeLog(chatId, { kind: "telemetry", stage: "alpha_signal", signalType, payload: { mint: payload?.mint, meta: { source: payload?.type || signalType } } });
+        addTradeLog(chatId, {
+          kind: "telemetry",
+          stage: "alpha_signal",
+          signalType,
+          payload: {
+            mint: payload?.mint,
+            meta: { source: payload?.type || signalType },
+          },
+        });
       }
     } catch {}
 
@@ -70,20 +82,27 @@ async function main() {
         if (!state?.autoSnipeOnPaste || !hasWallet) return;
 
         // For pre-LP style signals, optionally respect per-chat toggle if present
-        if (signalType === "pre_lp_detected" && state?.preLPWatchEnabled === false) return;
+        if (
+          signalType === "pre_lp_detected" &&
+          state?.preLPWatchEnabled === false
+        )
+          return;
 
         const bot = getBotInstance();
         const mint = payload?.mint;
         if (!mint) return;
         const amountSol = Number(state?.defaultSnipeSol ?? 0.05);
-        const useJitoBundle = !!(state?.enableJitoForSnipes);
+        const useJitoBundle = !!state?.enableJitoForSnipes;
         const pollInterval = Number(state?.snipePollInterval ?? 300);
         const slippageBps = Number(state?.snipeSlippage ?? 100);
         const retryCount = Number(state?.snipeRetryCount ?? 3);
 
         // Announce intent (non-blocking)
         try {
-          bot?.sendMessage?.(chatId, `🎯 Alpha signal (${signalType}) for ${mint}. Starting early snipe watcher...`);
+          bot?.sendMessage?.(
+            chatId,
+            `🎯 Alpha signal (${signalType}) for ${mint}. Starting early snipe watcher...`
+          );
         } catch {}
 
         // Kick off the shared liquidity watcher (has guardrails, cool-off, flash-LP guard)
@@ -103,7 +122,19 @@ async function main() {
 
         // Persist orchestrator decision
         try {
-          addTradeLog(chatId, { kind: "telemetry", stage: "orchestrator_start", signalType, mint, params: { amountSol, pollInterval, slippageBps, retryCount, useJitoBundle } });
+          addTradeLog(chatId, {
+            kind: "telemetry",
+            stage: "orchestrator_start",
+            signalType,
+            mint,
+            params: {
+              amountSol,
+              pollInterval,
+              slippageBps,
+              retryCount,
+              useJitoBundle,
+            },
+          });
         } catch {}
       } catch (e) {
         // best-effort; continue other users
@@ -112,9 +143,15 @@ async function main() {
   }
 
   alphaBus.on("pump_launch", (p) => orchestrateEarlySnipe("pump_launch", p));
-  alphaBus.on("known_dev_launch", (p) => orchestrateEarlySnipe("known_dev_launch", p));
-  alphaBus.on("pre_lp_detected", (p) => orchestrateEarlySnipe("pre_lp_detected", p));
-  alphaBus.on("dev_wallet_activity", (p) => orchestrateEarlySnipe("dev_wallet_activity", p));
+  alphaBus.on("known_dev_launch", (p) =>
+    orchestrateEarlySnipe("known_dev_launch", p)
+  );
+  alphaBus.on("pre_lp_detected", (p) =>
+    orchestrateEarlySnipe("pre_lp_detected", p)
+  );
+  alphaBus.on("dev_wallet_activity", (p) =>
+    orchestrateEarlySnipe("dev_wallet_activity", p)
+  );
 
   // LP unlock alarms -> Telegram broadcast per user setting
   function humanizeDelta(ms) {
@@ -133,23 +170,31 @@ async function main() {
       const { type, mint, provider, unlockAt } = evt || {};
       const bot = getBotInstance();
       if (!bot || !mint) return;
-      const whenStr = unlockAt ? new Date(unlockAt).toLocaleString() : "unknown";
+      const whenStr = unlockAt
+        ? new Date(unlockAt).toLocaleString()
+        : "unknown";
       const rel = unlockAt ? humanizeDelta(unlockAt - Date.now()) : "";
       const short = shortenAddress(String(mint));
       const link = `https://dexscreener.com/solana/${mint}`;
-      const header = type === "unlock" ? "🔓 LP Unlock" : "⏰ LP Unlock (Pre-Alert)";
+      const header =
+        type === "unlock" ? "🔓 LP Unlock" : "⏰ LP Unlock (Pre-Alert)";
       const body = [
         `${header}`,
         `Token: <code>${short}</code>`,
         `Provider: ${provider || "unknown"}`,
         unlockAt ? `When: ${whenStr} (${rel})` : undefined,
         `Link: ${link}`,
-      ].filter(Boolean).join("\n");
+      ]
+        .filter(Boolean)
+        .join("\n");
 
       for (const [chatId, state] of getAllUserStates()) {
         if (state?.lpUnlockAlerts === false) continue; // respect per-user toggle
         try {
-          bot.sendMessage(chatId, body, { parse_mode: "HTML", disable_web_page_preview: true });
+          bot.sendMessage(chatId, body, {
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+          });
         } catch {}
       }
     } catch (e) {

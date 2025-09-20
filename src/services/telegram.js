@@ -2961,7 +2961,11 @@ export async function startTelegramBot() {
             if (Number.isFinite(cap) && amountSol > remaining + 1e-9) {
               await bot.sendMessage(
                 chatId,
-                `🚫 Daily spend cap reached. Tier: ${state.tier}. Cap: ${cap} SOL. Spent today: ${spent.toFixed(4)} SOL. Remaining: ${Math.max(0, remaining).toFixed(4)} SOL.`
+                `🚫 Daily spend cap reached. Tier: ${
+                  state.tier
+                }. Cap: ${cap} SOL. Spent today: ${spent.toFixed(
+                  4
+                )} SOL. Remaining: ${Math.max(0, remaining).toFixed(4)} SOL.`
               );
               setPendingInput(chatId, null);
               return;
@@ -2985,7 +2989,8 @@ export async function startTelegramBot() {
           }
 
           const s = getUserState(chatId) || {};
-          const priorityFeeLamports = s.maxSnipeGasPrice ?? getPriorityFeeLamports();
+          const priorityFeeLamports =
+            s.maxSnipeGasPrice ?? getPriorityFeeLamports();
           const useJitoBundle = s.enableJitoForSnipes ?? getUseJitoBundle();
           const pollInterval = s.snipePollInterval;
           const slippageBps = s.snipeSlippage;
@@ -3028,7 +3033,10 @@ export async function startTelegramBot() {
             `👀 Watching for LP on ${tokenAddress}. Will buy ${amountSol} SOL when detected.`
           );
         } catch (e) {
-          await bot.sendMessage(chatId, `❌ Failed to start snipe: ${e?.message || e}`);
+          await bot.sendMessage(
+            chatId,
+            `❌ Failed to start snipe: ${e?.message || e}`
+          );
         }
         return;
       }

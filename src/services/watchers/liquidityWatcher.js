@@ -38,7 +38,12 @@ export function startLiquidityWatch(
   const COOLDOWN_MS = Number(process.env.SNIPE_COOL_OFF_MS ?? 30000);
   const coolUntil = cooldowns.get(k) || 0;
   if (coolUntil && Date.now() < coolUntil) {
-    onEvent?.(`In cool-off for ${Math.max(0, coolUntil - Date.now())}ms. Skipping start.`);
+    onEvent?.(
+      `In cool-off for ${Math.max(
+        0,
+        coolUntil - Date.now()
+      )}ms. Skipping start.`
+    );
     return;
   }
   if (activeWatchers.has(k)) return;
@@ -52,7 +57,8 @@ export function startLiquidityWatch(
   let insufficientWarned = false;
 
   // Liquidity delta heuristics & guardrails (configurable via ENV)
-  const envDeltaEnabled = String(process.env.LIQ_DELTA_ENABLED || "true").toLowerCase() !== "false";
+  const envDeltaEnabled =
+    String(process.env.LIQ_DELTA_ENABLED || "true").toLowerCase() !== "false";
   const state = getUserState?.(chatId);
   const LIQ_DELTA_ENABLED = !!(state?.liqDeltaEnabled ?? envDeltaEnabled);
   const DELTA_PROBE_SOL = Number(
@@ -100,7 +106,9 @@ export function startLiquidityWatch(
     const bal = await getWalletBalance(chatId);
     if ((bal?.solBalance || 0) < amountSol) {
       if (!insufficientWarned) {
-        onEvent?.(`Insufficient SOL (${bal?.solBalance || 0}). Deposit to proceed.`);
+        onEvent?.(
+          `Insufficient SOL (${bal?.solBalance || 0}). Deposit to proceed.`
+        );
         insufficientWarned = true;
         // Pause this watcher to avoid repeated warnings
         stopLiquidityWatch(chatId, mint, "insufficient_sol");
@@ -141,7 +149,15 @@ export function startLiquidityWatch(
         timeoutMs: 900,
       });
       if (!route) {
-        try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "route_check", status: "unavailable", attempt: attempts }); } catch {}
+        try {
+          addTradeLog(chatId, {
+            kind: "telemetry",
+            mint,
+            stage: "route_check",
+            status: "unavailable",
+            attempt: attempts,
+          });
+        } catch {}
         return; // not ready yet
       }
 
@@ -150,7 +166,10 @@ export function startLiquidityWatch(
         if (routeFirstSeenAt === null) routeFirstSeenAt = Date.now();
 
         // Probe with a fixed small size to compute per-SOL unit out and track deltas
-        const probeLamports = Math.max(1_000_000, Math.round(DELTA_PROBE_SOL * 1e9)); // >= 0.001 SOL
+        const probeLamports = Math.max(
+          1_000_000,
+          Math.round(DELTA_PROBE_SOL * 1e9)
+        ); // >= 0.001 SOL
         let probeRoute = null;
         try {
           probeRoute = await getQuoteRaw({
@@ -163,36 +182,96 @@ export function startLiquidityWatch(
         } catch {}
         if (!probeRoute) {
           onEvent?.("Probe route unavailable yet, waiting...");
-          try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "probe_check", status: "unavailable", attempt: attempts, probeLamports }); } catch {}
+          try {
+            addTradeLog(chatId, {
+              kind: "telemetry",
+              mint,
+              stage: "probe_check",
+              status: "unavailable",
+              attempt: attempts,
+              probeLamports,
+            });
+          } catch {}
           return;
         }
 
-        const unitOutProbe = Number(probeRoute.outAmount || 0) / Math.max(1, probeLamports);
-        const priceImpactPct = Number(probeRoute.priceImpactPct ?? route.priceImpactPct ?? 0);
+        const unitOutProbe =
+          Number(probeRoute.outAmount || 0) / Math.max(1, probeLamports);
+        const priceImpactPct = Number(
+          probeRoute.priceImpactPct ?? route.priceImpactPct ?? 0
+        );
 
         // Guardrail: avoid entering on very high impact (thin LP)
         if (priceImpactPct > DELTA_MAX_PRICE_IMPACT_PCT) {
-          onEvent?.(`Impact ${priceImpactPct.toFixed(2)}% > ${DELTA_MAX_PRICE_IMPACT_PCT}%. Waiting for more depth.`);
-          try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "guardrail", reason: "impact_exceeds_threshold", priceImpactPct, threshold: DELTA_MAX_PRICE_IMPACT_PCT, attempt: attempts }); } catch {}
+          onEvent?.(
+            `Impact ${priceImpactPct.toFixed(
+              2
+            )}% > ${DELTA_MAX_PRICE_IMPACT_PCT}%. Waiting for more depth.`
+          );
+          try {
+            addTradeLog(chatId, {
+              kind: "telemetry",
+              mint,
+              stage: "guardrail",
+              reason: "impact_exceeds_threshold",
+              priceImpactPct,
+              threshold: DELTA_MAX_PRICE_IMPACT_PCT,
+              attempt: attempts,
+            });
+          } catch {}
           prevUnitOutProbe = unitOutProbe;
           return;
         }
 
         // If we have a previous observation, require minimum improvement unless route has aged sufficiently
         if (prevUnitOutProbe !== null) {
-          const improvPct = ((unitOutProbe - prevUnitOutProbe) / Math.max(1e-12, prevUnitOutProbe)) * 100;
+          const improvPct =
+            ((unitOutProbe - prevUnitOutProbe) /
+              Math.max(1e-12, prevUnitOutProbe)) *
+            100;
           const ageMs = Date.now() - routeFirstSeenAt;
-          if (improvPct < DELTA_MIN_IMPROV_PCT && ageMs < DELTA_MIN_ROUTE_AGE_MS) {
-            onEvent?.(`ΔunitOut ${improvPct.toFixed(2)}% < ${DELTA_MIN_IMPROV_PCT}% (age ${ageMs}ms). Waiting.`);
-            try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "guardrail", reason: "improv_below_threshold", improvPct, minImprovementPct: DELTA_MIN_IMPROV_PCT, ageMs, minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS, attempt: attempts }); } catch {}
+          if (
+            improvPct < DELTA_MIN_IMPROV_PCT &&
+            ageMs < DELTA_MIN_ROUTE_AGE_MS
+          ) {
+            onEvent?.(
+              `ΔunitOut ${improvPct.toFixed(
+                2
+              )}% < ${DELTA_MIN_IMPROV_PCT}% (age ${ageMs}ms). Waiting.`
+            );
+            try {
+              addTradeLog(chatId, {
+                kind: "telemetry",
+                mint,
+                stage: "guardrail",
+                reason: "improv_below_threshold",
+                improvPct,
+                minImprovementPct: DELTA_MIN_IMPROV_PCT,
+                ageMs,
+                minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
+                attempt: attempts,
+              });
+            } catch {}
             prevUnitOutProbe = unitOutProbe;
             return;
           }
         } else if (DELTA_MIN_ROUTE_AGE_MS > 0) {
           const age = Date.now() - routeFirstSeenAt;
           if (age < DELTA_MIN_ROUTE_AGE_MS) {
-            onEvent?.(`Route age ${age}ms < ${DELTA_MIN_ROUTE_AGE_MS}ms. Waiting.`);
-            try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "guardrail", reason: "route_too_young", ageMs: age, minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS, attempt: attempts }); } catch {}
+            onEvent?.(
+              `Route age ${age}ms < ${DELTA_MIN_ROUTE_AGE_MS}ms. Waiting.`
+            );
+            try {
+              addTradeLog(chatId, {
+                kind: "telemetry",
+                mint,
+                stage: "guardrail",
+                reason: "route_too_young",
+                ageMs: age,
+                minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
+                attempt: attempts,
+              });
+            } catch {}
             prevUnitOutProbe = unitOutProbe;
             return;
           }
@@ -218,7 +297,16 @@ export function startLiquidityWatch(
             },
             ts: Date.now(),
           });
-          try { addTradeLog(chatId, { kind: "telemetry", mint, stage: "delta_emitted", unitOutProbe, priceImpactPct, attempt: attempts }); } catch {}
+          try {
+            addTradeLog(chatId, {
+              kind: "telemetry",
+              mint,
+              stage: "delta_emitted",
+              unitOutProbe,
+              priceImpactPct,
+              attempt: attempts,
+            });
+          } catch {}
         } catch {}
       }
 
@@ -255,29 +343,50 @@ export function startLiquidityWatch(
             }).catch(() => null),
           ]);
 
-          const unitBase = Number(route?.outAmount || 0) / Math.max(1, Math.round(amountSol * 1e9));
-          const unitSmall = routeSmall ? Number(routeSmall.outAmount || 0) / Math.max(1, Math.round(smallAmtSol * 1e9)) : null;
-          const unitLarge = routeLarge ? Number(routeLarge.outAmount || 0) / Math.max(1, Math.round(largeAmtSol * 1e9)) : null;
+          const unitBase =
+            Number(route?.outAmount || 0) /
+            Math.max(1, Math.round(amountSol * 1e9));
+          const unitSmall = routeSmall
+            ? Number(routeSmall.outAmount || 0) /
+              Math.max(1, Math.round(smallAmtSol * 1e9))
+            : null;
+          const unitLarge = routeLarge
+            ? Number(routeLarge.outAmount || 0) /
+              Math.max(1, Math.round(largeAmtSol * 1e9))
+            : null;
 
           // Depth ratio: how much worse per-SOL output gets when scaling size up
-          let depthRatio = unitLarge && unitBase ? unitLarge / Math.max(1e-12, unitBase) : null;
+          let depthRatio =
+            unitLarge && unitBase
+              ? unitLarge / Math.max(1e-12, unitBase)
+              : null;
 
           // Decision matrix combining price impact and depth ratio
           if (impactBase >= 7 || (depthRatio !== null && depthRatio < 0.7)) {
             // Very thin/curved: cut size aggressively
             buyAmountSol = Math.max(minSol, amountSol * 0.4);
-          } else if (impactBase >= 4 || (depthRatio !== null && depthRatio < 0.85)) {
+          } else if (
+            impactBase >= 4 ||
+            (depthRatio !== null && depthRatio < 0.85)
+          ) {
             buyAmountSol = Math.max(minSol, amountSol * 0.6);
-          } else if (impactBase <= 1.0 && (depthRatio === null || depthRatio >= 0.95)) {
+          } else if (
+            impactBase <= 1.0 &&
+            (depthRatio === null || depthRatio >= 0.95)
+          ) {
             // Deep and flat: scale up within cap
             buyAmountSol = Math.min(maxSol, amountSol * 1.8);
-          } else if (impactBase <= 2.0 && (depthRatio === null || depthRatio >= 0.9)) {
+          } else if (
+            impactBase <= 2.0 &&
+            (depthRatio === null || depthRatio >= 0.9)
+          ) {
             buyAmountSol = Math.min(maxSol, amountSol * 1.4);
           }
         } catch {
           // Fallback to simple impact-only rule if probes fail
           if (impactBase >= 5) buyAmountSol = Math.max(minSol, amountSol * 0.5);
-          else if (impactBase <= 1) buyAmountSol = Math.min(maxSol, amountSol * 2);
+          else if (impactBase <= 1)
+            buyAmountSol = Math.min(maxSol, amountSol * 2);
         }
       }
 
@@ -354,7 +463,9 @@ export function startLiquidityWatch(
           });
         } catch {}
         onEvent?.(
-          `⚠️ Swap tx not confirmed (${failedConf ? "failed" : "timeout"}). Retrying... Tx: ${txid}`
+          `⚠️ Swap tx not confirmed (${
+            failedConf ? "failed" : "timeout"
+          }). Retrying... Tx: ${txid}`
         );
         throw new Error("tx_not_confirmed");
       }
@@ -414,7 +525,13 @@ export function startLiquidityWatch(
         onEvent?.(`Stopped watcher after ${attempts} attempts.`);
         try {
           cooldowns.set(k, Date.now() + COOLDOWN_MS);
-          addTradeLog(chatId, { kind: "telemetry", mint, stage: "cooldown_set", coolOffMs: COOLDOWN_MS, attempts });
+          addTradeLog(chatId, {
+            kind: "telemetry",
+            mint,
+            stage: "cooldown_set",
+            coolOffMs: COOLDOWN_MS,
+            attempts,
+          });
         } catch {}
       }
     }

@@ -17,7 +17,6 @@ export async function buildWalletStatusHeader(chatId) {
   return `Wallet: ${info?.address || "?"}\nSOL: ${balance}\nRPC: ${rpc}`;
 }
 
-
 export function buildAutomationMenu(chatId) {
   const state = getUserState(chatId);
   const autoSnipeText = state.autoSnipeMode
@@ -117,7 +116,7 @@ export function buildSettingsMenu(chatId) {
         ],
         [{ text: "🎯 Slippage Settings", callback_data: "SLIPPAGE_CONFIG" }],
         [{ text: "🎯 Snipe Defaults", callback_data: "SNIPE_DEFAULTS" }],
-        [{ text: "🔙 Back to Trading Tools", callback_data: "TRADING_TOOLS" }],
+        [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
       ],
     },
   };
@@ -167,7 +166,6 @@ export function buildPositionsMenu(chatId) {
 
   return { reply_markup: { inline_keyboard: keyboard } };
 }
-
 
 // Updated settings submenu
 export function buildTurboSolSettingsMenu(chatId) {
@@ -232,7 +230,7 @@ export function buildTurboSolSettingsMenu(chatId) {
           },
         ],
         [
-          { text: "🔙 Back", callback_data: "MAIN_MENU" },
+          { text: "🔙 Back to Main", callback_data: "MAIN_MENU" },
           { text: "❌ Close", callback_data: "CLOSE_MENU" },
         ],
       ],
@@ -265,7 +263,7 @@ export async function buildWalletsMenu(chatId) {
     ]);
   }
 
-  keyboard.push([{ text: "🔙 Back to Settings", callback_data: "SETTINGS" }]);
+  keyboard.push([{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }]);
 
   return { reply_markup: { inline_keyboard: keyboard } };
 }
@@ -276,7 +274,7 @@ export async function buildWalletDetailsMenu(chatId, walletId) {
   if (!wallet) {
     return {
       reply_markup: {
-        inline_keyboard: [[{ text: "🔙 Back", callback_data: "WALLETS_MENU" }]],
+        inline_keyboard: [[{ text: "🔙 Back", callback_data: "MAIN_MENU" }]],
       },
     };
   }
@@ -292,7 +290,7 @@ export async function buildWalletDetailsMenu(chatId, walletId) {
           { text: "✏️ Rename", callback_data: `RENAME_${wallet.id}` },
         ],
         [{ text: "❌ Delete", callback_data: `DELETE_${wallet.id}` }],
-        [{ text: "🔙 Back", callback_data: "WALLETS_MENU" }],
+        [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
       ],
     },
   };
@@ -302,9 +300,7 @@ export function buildSupportMenu() {
   return {
     reply_markup: {
       inline_keyboard: [
-        [
-          { text: "📨 Contact Support", callback_data: "CONTACT_SUPPORT" },
-        ],
+        [{ text: "📨 Contact Support", callback_data: "CONTACT_SUPPORT" }],
         [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
       ],
     },
@@ -319,7 +315,10 @@ export function buildSnipeDefaultsMenu(chatId) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: `⛽ Max Priority Fee: ${fee || "Auto"}` , callback_data: "SET_SNIPE_FEE" },
+          {
+            text: `⛽ Max Priority Fee: ${fee || "Auto"}`,
+            callback_data: "SET_SNIPE_FEE",
+          },
         ],
         [
           {
@@ -327,7 +326,7 @@ export function buildSnipeDefaultsMenu(chatId) {
             callback_data: "SET_DEFAULT_BUY",
           },
         ],
-        [{ text: "🔙 Back", callback_data: "SETTINGS" }],
+        [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
       ],
     },
   };
@@ -344,20 +343,29 @@ export function buildRpcSettingsMenu(chatId) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: `Current RPC: #${current + 1}` , callback_data: "RPC_NEXT" },
+          { text: `Current RPC: #${current + 1}`, callback_data: "RPC_NEXT" },
           { text: "🔁 Rotate", callback_data: "RPC_ROTATE" },
         ],
         [
-          { text: `⛽ Global Priority Fee: ${tip}` , callback_data: "SET_PRIORITY_FEE" },
+          {
+            text: `⛽ Global Priority Fee: ${tip}`,
+            callback_data: "SET_PRIORITY_FEE",
+          },
         ],
         [
-          { text: `Jito Bundle: ${getUseJitoBundle() ? "ON" : "OFF"}` , callback_data: "JITO_SETTINGS" },
+          {
+            text: `Jito Bundle: ${getUseJitoBundle() ? "ON" : "OFF"}`,
+            callback_data: "JITO_SETTINGS",
+          },
         ],
         [
-          { text: `Relay: ${vendor}` , callback_data: "SET_RELAY_VENDOR" },
-          { text: `Dynamic Tip: ${dyn ? "ON" : "OFF"}` , callback_data: "TOGGLE_DYNAMIC_TIP" },
+          { text: `Relay: ${vendor}`, callback_data: "SET_RELAY_VENDOR" },
+          {
+            text: `Dynamic Tip: ${dyn ? "ON" : "OFF"}`,
+            callback_data: "TOGGLE_DYNAMIC_TIP",
+          },
         ],
-        [{ text: "🔙 Back", callback_data: "SETTINGS" }],
+        [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
       ],
     },
   };
@@ -370,12 +378,18 @@ export function buildFeeSettingsMenu(chatId) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: `⛽ Global Priority Fee: ${tip}` , callback_data: "SET_PRIORITY_FEE" },
+          {
+            text: `⛽ Global Priority Fee: ${tip}`,
+            callback_data: "SET_PRIORITY_FEE",
+          },
         ],
         [
-          { text: `Use Jito Bundle: ${getUseJitoBundle() ? "ON" : "OFF"}` , callback_data: "JITO_SETTINGS" },
+          {
+            text: `Use Jito Bundle: ${getUseJitoBundle() ? "ON" : "OFF"}`,
+            callback_data: "JITO_SETTINGS",
+          },
         ],
-        [{ text: "🔙 Back", callback_data: "SETTINGS" }],
+        [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
       ],
     },
   };
@@ -418,15 +432,22 @@ export function buildCopyTradeWalletMenu(chatId, address) {
 
   const keyboard = [
     [
-      { text: `${isEnabled ? "✅" : "⛔"} Wallet ${isEnabled ? "ON" : "OFF"}`, callback_data: `CT_W_ENABLE_TOGGLE_${address}` },
+      {
+        text: `${isEnabled ? "✅" : "⛔"} Wallet ${isEnabled ? "ON" : "OFF"}`,
+        callback_data: `CT_W_ENABLE_TOGGLE_${address}`,
+      },
     ],
     [
-      { text: `🟢 Buy ${buyOn ? "ON" : "OFF"}`, callback_data: `CT_W_BUY_TOGGLE_${address}` },
-      { text: `🔴 Sell ${sellOn ? "ON" : "OFF"}`, callback_data: `CT_W_SELL_TOGGLE_${address}` },
+      {
+        text: `🟢 Buy ${buyOn ? "ON" : "OFF"}`,
+        callback_data: `CT_W_BUY_TOGGLE_${address}`,
+      },
+      {
+        text: `🔴 Sell ${sellOn ? "ON" : "OFF"}`,
+        callback_data: `CT_W_SELL_TOGGLE_${address}`,
+      },
     ],
-    [
-      { text: "🗑 Remove", callback_data: `CT_RM_${address}` },
-    ],
+    [{ text: "🗑 Remove", callback_data: `CT_RM_${address}` }],
     [
       { text: "🔙 Back", callback_data: "CT_BACK" },
       { text: "🏠 Main", callback_data: "MAIN_MENU" },

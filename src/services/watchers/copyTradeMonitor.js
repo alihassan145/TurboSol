@@ -1,6 +1,11 @@
 import { PublicKey } from "@solana/web3.js";
 import { getRpcConnection } from "../rpc.js";
-import { getAllUserStates, getCopyTradeState, addTradeLog, getDailySpent } from "../userState.js";
+import {
+  getAllUserStates,
+  getCopyTradeState,
+  addTradeLog,
+  getDailySpent,
+} from "../userState.js";
 import { hasUserWallet } from "../userWallets.js";
 import { getBotInstance } from "../telegram.js";
 import { notifyTxStatus } from "../telegram.js";
@@ -34,7 +39,10 @@ async function analyzeSwapDirection(connection, tx) {
       if (!m) continue;
       const ui = Number(b?.uiTokenAmount?.uiAmount || 0);
       const preMatch = pre.find(
-        (p) => p?.mint === m && p?.owner === b?.owner && p?.accountIndex === b?.accountIndex
+        (p) =>
+          p?.mint === m &&
+          p?.owner === b?.owner &&
+          p?.accountIndex === b?.accountIndex
       );
       const preUi = Number(preMatch?.uiTokenAmount?.uiAmount || 0);
       const delta = ui - preUi;
@@ -55,9 +63,10 @@ async function analyzeSwapDirection(connection, tx) {
     // Determine if SOL is leg: check native balance change of payer (account 0)
     const preLam = Number(tx?.meta?.preBalances?.[0] ?? NaN);
     const postLam = Number(tx?.meta?.postBalances?.[0] ?? NaN);
-    const solDelta = Number.isFinite(preLam) && Number.isFinite(postLam)
-      ? (postLam - preLam) / 1e9
-      : 0;
+    const solDelta =
+      Number.isFinite(preLam) && Number.isFinite(postLam)
+        ? (postLam - preLam) / 1e9
+        : 0;
 
     if (acquired && solDelta < 0) {
       // BUY: spent SOL to acquire acquired.mint
@@ -71,7 +80,8 @@ async function analyzeSwapDirection(connection, tx) {
     // Fallback: logs heuristic for Jupiter mentions
     const logs = tx?.meta?.logMessages || [];
     for (const l of logs) {
-      if (/jupiter|swap/i.test(l) && acquired?.mint) return { type: "buy", mint: acquired.mint };
+      if (/jupiter|swap/i.test(l) && acquired?.mint)
+        return { type: "buy", mint: acquired.mint };
     }
   } catch {}
   return null;
@@ -113,7 +123,9 @@ export function decideCopyAction({
   eventType,
   followed = {},
   dailySpent = 0,
-  envDefaultDailyCap = Number(process.env.COPY_TRADE_DEFAULT_DAILY_CAP_SOL || 5),
+  envDefaultDailyCap = Number(
+    process.env.COPY_TRADE_DEFAULT_DAILY_CAP_SOL || 5
+  ),
 }) {
   if (eventType === "buy") {
     const mode = followed.mode || "fixed";
@@ -121,7 +133,8 @@ export function decideCopyAction({
     if (mode === "percent") {
       const pct = clamp(Number(followed.percent || 10), 1, 100);
       const capBase =
-        followed.dailyCapSOL != null && Number.isFinite(Number(followed.dailyCapSOL))
+        followed.dailyCapSOL != null &&
+        Number.isFinite(Number(followed.dailyCapSOL))
           ? Number(followed.dailyCapSOL)
           : envDefaultDailyCap;
       amountSol = (Number(capBase) * pct) / 100;
@@ -137,7 +150,8 @@ export function decideCopyAction({
 
     // Enforce daily cap remaining if configured
     const dailyCap =
-      followed.dailyCapSOL != null && Number.isFinite(Number(followed.dailyCapSOL))
+      followed.dailyCapSOL != null &&
+      Number.isFinite(Number(followed.dailyCapSOL))
         ? Number(followed.dailyCapSOL)
         : null;
     if (dailyCap && dailyCap > 0) {
@@ -159,7 +173,14 @@ export function decideCopyAction({
   return { execute: false, reason: "unsupported_event" };
 }
 
-async function maybeExecuteCopy({ chatId, followed, event, sourceAddr, sig, inflightSet }) {
+async function maybeExecuteCopy({
+  chatId,
+  followed,
+  event,
+  sourceAddr,
+  sig,
+  inflightSet,
+}) {
   const bot = getBotInstance();
   try {
     const hasWallet = await hasUserWallet(chatId).catch(() => false);
@@ -178,19 +199,31 @@ async function maybeExecuteCopy({ chatId, followed, event, sourceAddr, sig, infl
     // Risk filter
     const riskOk = await riskCheckToken(mint).catch(() => ({ ok: true }));
     if (riskOk && riskOk.ok === false) {
-      addTradeLog(chatId, { kind: "copy_trade_skip", reason: "risk_check_fail", mint, sourceAddr, sig });
+      addTradeLog(chatId, {
+        kind: "copy_trade_skip",
+        reason: "risk_check_fail",
+        mint,
+        sourceAddr,
+        sig,
+      });
       return;
     }
 
     // Concurrency guard per chat
-    const maxConc = Number.isFinite(Number(followed.maxConcurrent)) ? Number(followed.maxConcurrent) : null;
+    const maxConc = Number.isFinite(Number(followed.maxConcurrent))
+      ? Number(followed.maxConcurrent)
+      : null;
     if (maxConc && inflightSet && inflightSet.size >= maxConc) {
       return; // throttle
     }
 
     // Decision helper for sizing
     const spent = Number(getDailySpent(chatId));
-    const decision = decideCopyAction({ eventType: event.type, followed, dailySpent: spent });
+    const decision = decideCopyAction({
+      eventType: event.type,
+      followed,
+      dailySpent: spent,
+    });
     if (!decision.execute) return;
 
     const slippageBps = Number.isFinite(Number(followed.slippageBps))
@@ -216,7 +249,15 @@ async function maybeExecuteCopy({ chatId, followed, event, sourceAddr, sig, infl
         const txid = res?.txid || null;
         bot?.sendMessage?.(
           chatId,
-          `🤖 Copied BUY from ${sourceAddr}\n• Token: ${mint}\n• Amount: ${amountSol} SOL\n• Route: ${res?.route?.labels}\n• Impact: ${typeof res?.route?.priceImpactPct === "number" ? (res.route.priceImpactPct*100).toFixed(2)+"%" : "?"}\n• Slippage: ${res?.slippageBps} bps\n• Via: ${res?.via}\n• Latency: ${res?.latencyMs} ms\n• Tx: ${txid}`
+          `🤖 Copied BUY from ${sourceAddr}\n• Token: ${mint}\n• Amount: ${amountSol} SOL\n• Route: ${
+            res?.route?.labels
+          }\n• Impact: ${
+            typeof res?.route?.priceImpactPct === "number"
+              ? (res.route.priceImpactPct * 100).toFixed(2) + "%"
+              : "?"
+          }\n• Slippage: ${res?.slippageBps} bps\n• Via: ${
+            res?.via
+          }\n• Latency: ${res?.latencyMs} ms\n• Tx: ${txid}`
         );
         addTradeLog(chatId, {
           kind: "copy_buy",
@@ -234,11 +275,27 @@ async function maybeExecuteCopy({ chatId, followed, event, sourceAddr, sig, infl
         notifyTxStatus(chatId, txid, { kind: "Copy Buy" }).catch(() => {});
       } else if (decision.kind === "sell") {
         const percent = decision.percent;
-        const res = await quickSell({ tokenMint: mint, percent, chatId, slippageBps });
-        const txid = res?.txid || (Array.isArray(res?.txids) ? res.txids[0] : null);
+        const res = await quickSell({
+          tokenMint: mint,
+          percent,
+          chatId,
+          slippageBps,
+        });
+        const txid =
+          res?.txid || (Array.isArray(res?.txids) ? res.txids[0] : null);
         bot?.sendMessage?.(
           chatId,
-          `🤖 Copied SELL from ${sourceAddr}\n• Token: ${mint}\n• Percent: ${percent}%\n• Est. SOL Out: ${typeof res?.output?.tokensOut === "number" ? res.output.tokensOut.toFixed(6) : "?"}\n• Route: ${res?.route?.labels}\n• Price impact: ${typeof res?.route?.priceImpactPct === "number" ? (res.route.priceImpactPct*100).toFixed(2)+"%" : "?"}\n• Slippage: ${res?.slippageBps} bps\n• Via: ${res?.via}\n• Latency: ${res?.latencyMs} ms\n• Tx: ${txid}`
+          `🤖 Copied SELL from ${sourceAddr}\n• Token: ${mint}\n• Percent: ${percent}%\n• Est. SOL Out: ${
+            typeof res?.output?.tokensOut === "number"
+              ? res.output.tokensOut.toFixed(6)
+              : "?"
+          }\n• Route: ${res?.route?.labels}\n• Price impact: ${
+            typeof res?.route?.priceImpactPct === "number"
+              ? (res.route.priceImpactPct * 100).toFixed(2) + "%"
+              : "?"
+          }\n• Slippage: ${res?.slippageBps} bps\n• Via: ${
+            res?.via
+          }\n• Latency: ${res?.latencyMs} ms\n• Tx: ${txid}`
         );
         addTradeLog(chatId, {
           kind: "copy_sell",
@@ -262,20 +319,35 @@ async function maybeExecuteCopy({ chatId, followed, event, sourceAddr, sig, infl
     }
   } catch (e) {
     try {
-      addTradeLog(chatId, { kind: "copy_trade_error", error: e?.message || String(e), sourceAddr, sig });
+      addTradeLog(chatId, {
+        kind: "copy_trade_error",
+        error: e?.message || String(e),
+        sourceAddr,
+        sig,
+      });
     } catch {}
     try {
-      getBotInstance()?.sendMessage?.(chatId, `❌ Copy Trade error: ${e?.message || e}`);
+      getBotInstance()?.sendMessage?.(
+        chatId,
+        `❌ Copy Trade error: ${e?.message || e}`
+      );
     } catch {}
   }
 }
 
-export function startCopyTradeMonitor(chatId, { pollMs = DEFAULT_POLL_MS } = {}) {
+export function startCopyTradeMonitor(
+  chatId,
+  { pollMs = DEFAULT_POLL_MS } = {}
+) {
   const connection = getRpcConnection();
   const copy = getCopyTradeState(chatId);
   if (!copy) return;
   if (!monitors.has(chatId)) {
-    monitors.set(chatId, { interval: null, lastSigByAddr: new Map(), inflight: new Set() });
+    monitors.set(chatId, {
+      interval: null,
+      lastSigByAddr: new Map(),
+      inflight: new Set(),
+    });
   }
   const mon = monitors.get(chatId);
   if (mon.interval) return; // already running
@@ -286,20 +358,35 @@ export function startCopyTradeMonitor(chatId, { pollMs = DEFAULT_POLL_MS } = {})
       if (!state) return;
       const ct = state.copyTrade || { enabled: false, followedWallets: [] };
       if (!ct.enabled) return;
-      const wallets = Array.isArray(ct.followedWallets) ? ct.followedWallets : [];
+      const wallets = Array.isArray(ct.followedWallets)
+        ? ct.followedWallets
+        : [];
       for (const w of wallets) {
         try {
           if (!w?.address || w.enabled === false) continue;
           const addr = new PublicKey(w.address);
-          const sigs = await connection.getSignaturesForAddress(addr, { limit: MAX_SIGS_PER_ADDR });
+          const sigs = await connection.getSignaturesForAddress(addr, {
+            limit: MAX_SIGS_PER_ADDR,
+          });
           const last = mon.lastSigByAddr.get(w.address);
           for (const s of sigs) {
             if (s.signature === last) break;
-            const tx = await connection.getTransaction(s.signature, { maxSupportedTransactionVersion: 0 }).catch(() => null);
+            const tx = await connection
+              .getTransaction(s.signature, {
+                maxSupportedTransactionVersion: 0,
+              })
+              .catch(() => null);
             if (!tx) continue;
             const event = await analyzeSwapDirection(connection, tx);
             if (event && (event.type === "buy" || event.type === "sell")) {
-              await maybeExecuteCopy({ chatId, followed: w, event, sourceAddr: w.address, sig: s.signature, inflightSet: mon.inflight });
+              await maybeExecuteCopy({
+                chatId,
+                followed: w,
+                event,
+                sourceAddr: w.address,
+                sig: s.signature,
+                inflightSet: mon.inflight,
+              });
             }
           }
           if (sigs[0]) mon.lastSigByAddr.set(w.address, sigs[0].signature);
