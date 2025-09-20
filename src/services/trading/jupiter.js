@@ -1,6 +1,9 @@
 import axios from "axios";
 import { PublicKey, VersionedTransaction } from "@solana/web3.js";
-import { getRpcConnection, getParsedTokenAccountsByOwnerRaced } from "../rpc.js";
+import {
+  getRpcConnection,
+  getParsedTokenAccountsByOwnerRaced,
+} from "../rpc.js";
 import { getUserWalletInstance } from "../wallet.js";
 import { getPriorityFeeLamports, getUseJitoBundle } from "../config.js";
 import { simulateBundleAndSend } from "../jito.js";
@@ -43,7 +46,9 @@ async function getMintDecimals(mint, connection) {
 function deriveRouteLabels(route) {
   try {
     const rp = Array.isArray(route?.routePlan) ? route.routePlan : [];
-    const labels = rp.map((s) => s?.swapInfo?.label || s?.swapInfo?.ammKey || "route").join(" > ");
+    const labels = rp
+      .map((s) => s?.swapInfo?.label || s?.swapInfo?.ammKey || "route")
+      .join(" > ");
     return labels || "route";
   } catch {
     return "route";
@@ -79,19 +84,39 @@ export async function getQuoteRaw({
   if (!res) return null;
   if (res.status >= 400) {
     const data = res.data || {};
-    return { __error__: true, errorCode: data.errorCode || `HTTP_${res.status}`, errorMessage: data.error || "" };
+    return {
+      __error__: true,
+      errorCode: data.errorCode || `HTTP_${res.status}`,
+      errorMessage: data.error || "",
+    };
   }
   return res.data || null;
 }
 
-export async function getTokenQuote({ inputMint, outputMint, amountSol, slippageBps = 100 }) {
+export async function getTokenQuote({
+  inputMint,
+  outputMint,
+  amountSol,
+  slippageBps = 100,
+}) {
   const amountRaw = Math.floor(Number(amountSol || 0) * 1e9);
   const baseTimeout = Number(process.env.QUOTE_TIMEOUT_MS || 1200);
-  const fallbackTimeout = Number(process.env.QUOTE_FALLBACK_TIMEOUT_MS || Math.max(2500, baseTimeout * 2));
-  const fallbackSlippageBps = Number(process.env.QUOTE_FALLBACK_SLIPPAGE_BPS || Math.max(300, slippageBps));
+  const fallbackTimeout = Number(
+    process.env.QUOTE_FALLBACK_TIMEOUT_MS || Math.max(2500, baseTimeout * 2)
+  );
+  const fallbackSlippageBps = Number(
+    process.env.QUOTE_FALLBACK_SLIPPAGE_BPS || Math.max(300, slippageBps)
+  );
 
   const tryGet = async (bps, tmo, direct = false, amt = amountRaw) => {
-    let r = await getQuoteRaw({ inputMint, outputMint, amountRaw: amt, slippageBps: bps, timeoutMs: tmo, onlyDirectRoutes: direct }).catch(() => null);
+    let r = await getQuoteRaw({
+      inputMint,
+      outputMint,
+      amountRaw: amt,
+      slippageBps: bps,
+      timeoutMs: tmo,
+      onlyDirectRoutes: direct,
+    }).catch(() => null);
     if (r && r.__error__) {
       // Avoid throwing here; callers expect null on failure
       r = null;
@@ -101,13 +126,19 @@ export async function getTokenQuote({ inputMint, outputMint, amountSol, slippage
 
   let route = await tryGet(slippageBps, baseTimeout);
   if (!route) route = await tryGet(slippageBps, fallbackTimeout);
-  if (!route && fallbackSlippageBps > slippageBps) route = await tryGet(fallbackSlippageBps, fallbackTimeout);
+  if (!route && fallbackSlippageBps > slippageBps)
+    route = await tryGet(fallbackSlippageBps, fallbackTimeout);
   if (!route) route = await tryGet(fallbackSlippageBps, fallbackTimeout, true);
   if (!route) {
     // Probe larger amounts quietly to detect liquidity thresholds, but don't throw
     for (const mult of [1.5, 2.0]) {
       const probe = Math.max(1, Math.floor(amountRaw * mult));
-      const rProbe = await tryGet(fallbackSlippageBps, fallbackTimeout, false, probe);
+      const rProbe = await tryGet(
+        fallbackSlippageBps,
+        fallbackTimeout,
+        false,
+        probe
+      );
       if (rProbe) {
         // We found a route with a higher amount, but to keep existing UX, just return null and let UI handle amount input
         break;
@@ -121,7 +152,8 @@ export async function getTokenQuote({ inputMint, outputMint, amountSol, slippage
   const connection = getRpcConnection();
   const outDec = await getMintDecimals(outputMint, connection).catch(() => 6);
   const outAmountRaw = Number(route?.outAmount) || 0;
-  const outAmountFormatted = outDec > 0 ? outAmountRaw / 10 ** outDec : outAmountRaw;
+  const outAmountFormatted =
+    outDec > 0 ? outAmountRaw / 10 ** outDec : outAmountRaw;
 
   return {
     route,
@@ -131,7 +163,12 @@ export async function getTokenQuote({ inputMint, outputMint, amountSol, slippage
   };
 }
 
-async function buildAndSignSwapTx({ route, userPk, priorityFeeLamports, chatId }) {
+async function buildAndSignSwapTx({
+  route,
+  userPk,
+  priorityFeeLamports,
+  chatId,
+}) {
   const body = {
     quoteResponse: route,
     userPublicKey: userPk,
@@ -153,34 +190,78 @@ async function buildAndSignSwapTx({ route, userPk, priorityFeeLamports, chatId }
   return tx;
 }
 
-export async function performSwap({ inputMint, outputMint, amountSol, chatId, priorityFeeLamports, useJitoBundle }) {
-  if (!Number.isFinite(Number(amountSol)) || Number(amountSol) <= 0) throw new Error("invalid_amount");
+export async function performSwap({
+  inputMint,
+  outputMint,
+  amountSol,
+  chatId,
+  priorityFeeLamports,
+  useJitoBundle,
+}) {
+  if (!Number.isFinite(Number(amountSol)) || Number(amountSol) <= 0)
+    throw new Error("invalid_amount");
   const connection = getRpcConnection();
   const wallet = await getUserWalletInstance(chatId);
-  const slippageBps = await getAdaptiveSlippageBps().catch(() => Number(process.env.DEFAULT_SLIPPAGE_BPS || 100));
+  const slippageBps = await getAdaptiveSlippageBps().catch(() =>
+    Number(process.env.DEFAULT_SLIPPAGE_BPS || 100)
+  );
 
-  const quoteRes = await getTokenQuote({ inputMint, outputMint, amountSol, slippageBps });
+  const quoteRes = await getTokenQuote({
+    inputMint,
+    outputMint,
+    amountSol,
+    slippageBps,
+  });
   const route = quoteRes?.route || null;
   if (!route) throw new Error("no_quote_route");
 
-  const tx = await buildAndSignSwapTx({ route, userPk: wallet.publicKey.toBase58(), priorityFeeLamports, chatId });
+  const tx = await buildAndSignSwapTx({
+    route,
+    userPk: wallet.publicKey.toBase58(),
+    priorityFeeLamports,
+    chatId,
+  });
   tx.sign([wallet]);
 
   let sendRes;
   try {
-    sendRes = await simulateBundleAndSend({ signedTx: tx, chatId, useJitoBundle: useJitoBundle ?? getUseJitoBundle(), priorityFeeMicroLamports: null });
+    sendRes = await simulateBundleAndSend({
+      signedTx: tx,
+      chatId,
+      useJitoBundle: useJitoBundle ?? getUseJitoBundle(),
+      priorityFeeMicroLamports: null,
+    });
   } catch (e) {
-    try { recordSlippageFeedback({ usedBps: slippageBps, priceImpactPct: route?.priceImpactPct, success: false, latencyMs: null }); } catch {}
+    try {
+      recordSlippageFeedback({
+        usedBps: slippageBps,
+        priceImpactPct: route?.priceImpactPct,
+        success: false,
+        latencyMs: null,
+      });
+    } catch {}
     throw e;
   }
-  try { recordSlippageFeedback({ usedBps: slippageBps, priceImpactPct: route?.priceImpactPct, success: true, latencyMs: sendRes?.latencyMs }); } catch {}
+  try {
+    recordSlippageFeedback({
+      usedBps: slippageBps,
+      priceImpactPct: route?.priceImpactPct,
+      success: true,
+      latencyMs: sendRes?.latencyMs,
+    });
+  } catch {}
 
   const outDec = await getMintDecimals(outputMint, connection).catch(() => 6);
-  const tokensOut = Number(route?.outAmount) ? Number(route.outAmount) / 10 ** outDec : null;
+  const tokensOut = Number(route?.outAmount)
+    ? Number(route.outAmount) / 10 ** outDec
+    : null;
 
   return {
     txid: sendRes?.txid || null,
-    route: { labels: deriveRouteLabels(route), priceImpactPct: route?.priceImpactPct ?? null },
+    route: {
+      labels: deriveRouteLabels(route),
+      priceImpactPct: route?.priceImpactPct ?? null,
+    },
     slippageBps,
     priorityFeeLamports: priorityFeeLamports ?? "auto",
     via: sendRes?.via || null,
@@ -192,7 +273,14 @@ export async function performSwap({ inputMint, outputMint, amountSol, chatId, pr
   };
 }
 
-export async function quickSell({ tokenMint, percent = 100, chatId, priorityFeeLamports, useJitoBundle, slippageBps: slippageBpsOverride }) {
+export async function quickSell({
+  tokenMint,
+  percent = 100,
+  chatId,
+  priorityFeeLamports,
+  useJitoBundle,
+  slippageBps: slippageBpsOverride,
+}) {
   const connection = getRpcConnection();
   const wallet = await getUserWalletInstance(chatId);
 
@@ -209,32 +297,70 @@ export async function quickSell({ tokenMint, percent = 100, chatId, priorityFeeL
     if (amtStr) rawBalance += BigInt(amtStr);
   }
   if (rawBalance <= 0n) throw new Error("no_token_balance");
-  const sellRaw = (rawBalance * BigInt(Math.max(1, Math.min(100, Math.floor(percent))))) / 100n;
+  const sellRaw =
+    (rawBalance * BigInt(Math.max(1, Math.min(100, Math.floor(percent))))) /
+    100n;
   if (sellRaw <= 0n) throw new Error("sell_amount_zero");
 
   const slippageBps = Number.isFinite(Number(slippageBpsOverride))
     ? Number(slippageBpsOverride)
-    : await getAdaptiveSlippageBps().catch(() => Number(process.env.DEFAULT_SLIPPAGE_BPS || 100));
-  const route = await getQuoteRaw({ inputMint: tokenMint, outputMint: NATIVE_SOL, amountRaw: Number(sellRaw), slippageBps }).catch(() => null);
+    : await getAdaptiveSlippageBps().catch(() =>
+        Number(process.env.DEFAULT_SLIPPAGE_BPS || 100)
+      );
+  const route = await getQuoteRaw({
+    inputMint: tokenMint,
+    outputMint: NATIVE_SOL,
+    amountRaw: Number(sellRaw),
+    slippageBps,
+  }).catch(() => null);
   if (!route) throw new Error("no_quote_route");
 
-  const tx = await buildAndSignSwapTx({ route, userPk: wallet.publicKey.toBase58(), priorityFeeLamports, chatId });
+  const tx = await buildAndSignSwapTx({
+    route,
+    userPk: wallet.publicKey.toBase58(),
+    priorityFeeLamports,
+    chatId,
+  });
   tx.sign([wallet]);
 
   let sendRes;
   try {
-    sendRes = await simulateBundleAndSend({ signedTx: tx, chatId, useJitoBundle: useJitoBundle ?? getUseJitoBundle(), priorityFeeMicroLamports: null });
+    sendRes = await simulateBundleAndSend({
+      signedTx: tx,
+      chatId,
+      useJitoBundle: useJitoBundle ?? getUseJitoBundle(),
+      priorityFeeMicroLamports: null,
+    });
   } catch (e) {
-    try { recordSlippageFeedback({ usedBps: slippageBps, priceImpactPct: route?.priceImpactPct, success: false, latencyMs: null }); } catch {}
+    try {
+      recordSlippageFeedback({
+        usedBps: slippageBps,
+        priceImpactPct: route?.priceImpactPct,
+        success: false,
+        latencyMs: null,
+      });
+    } catch {}
     throw e;
   }
-  try { recordSlippageFeedback({ usedBps: slippageBps, priceImpactPct: route?.priceImpactPct, success: true, latencyMs: sendRes?.latencyMs }); } catch {}
+  try {
+    recordSlippageFeedback({
+      usedBps: slippageBps,
+      priceImpactPct: route?.priceImpactPct,
+      success: true,
+      latencyMs: sendRes?.latencyMs,
+    });
+  } catch {}
 
-  const tokensOut = Number(route?.outAmount) ? Number(route.outAmount) / 1e9 : null;
+  const tokensOut = Number(route?.outAmount)
+    ? Number(route.outAmount) / 1e9
+    : null;
 
   return {
     txid: sendRes?.txid || null,
-    route: { labels: deriveRouteLabels(route), priceImpactPct: route?.priceImpactPct ?? null },
+    route: {
+      labels: deriveRouteLabels(route),
+      priceImpactPct: route?.priceImpactPct ?? null,
+    },
     slippageBps,
     priorityFeeLamports: priorityFeeLamports ?? "auto",
     via: sendRes?.via || null,

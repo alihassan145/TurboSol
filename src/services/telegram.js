@@ -41,7 +41,6 @@ import {
   getTokenMeta,
 } from "./walletInfo.js";
 import {
-  buildTurboSolMainMenu,
   buildTurboSolSettingsMenu,
   buildPositionsMenu,
   buildWalletsMenu,
@@ -64,6 +63,7 @@ import {
 } from "./userState.js";
 import { readTrades } from "./tradeStore.js";
 import { PublicKey } from "@solana/web3.js";
+import { transferSol, saveSuggestion } from "./miscActions.js";
 import { riskCheckToken } from "./risk.js";
 import { startStopLoss, stopStopLoss } from "./watchers/stopLossWatcher.js";
 import { stopPumpFunListener } from "./watchers/pumpfunWatcher.js";
@@ -144,6 +144,14 @@ function buildMainMenu(chatId) {
         [
           { text: "Quote", callback_data: "QUOTE" },
           { text: "⚙️ Settings", callback_data: "SETTINGS" },
+        ],
+        [
+          { text: "🤖 Copy Trade", callback_data: "COPY_TRADE" },
+          { text: "💸 Withdraw", callback_data: "WITHDRAW" },
+        ],
+        [
+          { text: "💡 Suggestions", callback_data: "SUGGESTIONS" },
+          { text: "🔄 Refresh", callback_data: "REFRESH" },
         ],
         [{ text: "🤖 Automation", callback_data: "AUTOMATION" }],
         [{ text: "Help", callback_data: "HELP" }],
@@ -271,23 +279,30 @@ export async function startTelegramBot() {
       const lines = last.map((t, i) => {
         const ts = t.timestamp ? new Date(t.timestamp).toLocaleString() : "";
         const kind = (t.kind || "trade").toUpperCase();
-        const mint = t.mint ? (t.mint.slice(0, 6) + "…" + t.mint.slice(-4)) : "?";
+        const mint = t.mint ? t.mint.slice(0, 6) + "…" + t.mint.slice(-4) : "?";
         const amount =
           t.kind === "buy"
             ? `${Number(t.sol || 0)} SOL`
             : t.kind === "sell"
             ? `${Number(t.solOut != null ? t.solOut : t.sol || 0)} SOL`
             : "";
-        const txid = t.txid ? (t.txid.slice(0, 8) + "…" + t.txid.slice(-8)) : "";
+        const txid = t.txid ? t.txid.slice(0, 8) + "…" + t.txid.slice(-8) : "";
         const via = t.via ? ` via ${t.via}` : "";
-        const lat = Number.isFinite(Number(t.latencyMs)) ? `, ${t.latencyMs}ms` : "";
+        const lat = Number.isFinite(Number(t.latencyMs))
+          ? `, ${t.latencyMs}ms`
+          : "";
         const status = t.status ? ` [${t.status}]` : "";
-        return `${i + 1}. ${kind}${status} — ${mint} — ${amount}${via}${lat} ${ts} ${txid}`.trim();
+        return `${
+          i + 1
+        }. ${kind}${status} — ${mint} — ${amount}${via}${lat} ${ts} ${txid}`.trim();
       });
       const header = n === 1 ? "Last transaction:" : `Last ${n} transactions:`;
       await bot.sendMessage(chatId, `${header}\n\n${lines.join("\n")}`);
     } catch (e) {
-      await bot.sendMessage(chatId, `Failed to load last transactions: ${e?.message || e}`);
+      await bot.sendMessage(
+        chatId,
+        `Failed to load last transactions: ${e?.message || e}`
+      );
     }
   });
 
@@ -300,14 +315,30 @@ export async function startTelegramBot() {
       updateUserSetting(chatId, "preLPWatchEnabled", next);
       if (next) {
         await startPreLPWatch(chatId, {
-          onEvent: (ev) => { try { bot.sendMessage(chatId, typeof ev === 'string' ? ev : ev?.type || 'prelp'); } catch {} },
-          onSnipeEvent: (mint, m) => { try { bot.sendMessage(chatId, `[PreLP ${mint}] ${m}`); } catch {} },
+          onEvent: (ev) => {
+            try {
+              bot.sendMessage(
+                chatId,
+                typeof ev === "string" ? ev : ev?.type || "prelp"
+              );
+            } catch {}
+          },
+          onSnipeEvent: (mint, m) => {
+            try {
+              bot.sendMessage(chatId, `[PreLP ${mint}] ${m}`);
+            } catch {}
+          },
           autoSnipeOnPreLP: true,
         });
       } else {
-        try { stopPreLPWatch(chatId); } catch {}
+        try {
+          stopPreLPWatch(chatId);
+        } catch {}
       }
-      await bot.sendMessage(chatId, next ? "🔬 Pre-LP scanner enabled" : "🔬 Pre-LP scanner disabled");
+      await bot.sendMessage(
+        chatId,
+        next ? "🔬 Pre-LP scanner enabled" : "🔬 Pre-LP scanner disabled"
+      );
     } catch (e) {
       await bot.sendMessage(chatId, `Pre-LP toggle failed: ${e?.message || e}`);
     }
@@ -320,7 +351,10 @@ export async function startTelegramBot() {
       const cur = !!getUserState(chatId).liqDeltaEnabled;
       const next = !cur;
       updateUserSetting(chatId, "liqDeltaEnabled", next);
-      await bot.sendMessage(chatId, next ? "📈 Delta heuristic enabled" : "📈 Delta heuristic disabled");
+      await bot.sendMessage(
+        chatId,
+        next ? "📈 Delta heuristic enabled" : "📈 Delta heuristic disabled"
+      );
     } catch (e) {
       await bot.sendMessage(chatId, `Delta toggle failed: ${e?.message || e}`);
     }
@@ -330,733 +364,889 @@ export async function startTelegramBot() {
     const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
     const data = query.data;
-      if (data === "REFRESH") {
-        const welcome = await buildTurboSolWelcomeMessage(chatId);
-        await bot.sendMessage(chatId, welcome);
-        return bot.sendMessage(chatId, "Choose an option:", {
-          reply_markup: buildMainMenu(chatId).reply_markup,
+
+    console.log(data === "SETTINGS");
+
+    // try { console.log(`[DEBUG] callback_query data=${data} chatId=${chatId}`); } catch {}
+    console.log(data);
+
+    if (data === "SETTINGS") {
+      console.log("CAlling settings");
+
+      console.log("Settings called");
+
+      try {
+        await bot.answerCallbackQuery(query.id);
+      } catch {}
+      try {
+        const markup = buildTurboSolSettingsMenu(chatId).reply_markup;
+        console.log(
+          `[DEBUG] Attempting editMessageText for SETTINGS chatId=${chatId} messageId=${messageId}`
+        );
+        await bot.editMessageText("⚙️ TurboSol Settings", {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: markup,
+        });
+        console.log(
+          `[DEBUG] editMessageText succeeded for SETTINGS chatId=${chatId}`
+        );
+      } catch (e1) {
+        try {
+          console.error(
+            `[ERROR] editMessageText failed for SETTINGS:`,
+            e1?.response?.body || e1?.message || e1
+          );
+          console.log(
+            `[DEBUG] Attempting editMessageReplyMarkup as fallback for SETTINGS chatId=${chatId} messageId=${messageId}`
+          );
+          await bot.editMessageReplyMarkup(
+            buildTurboSolSettingsMenu(chatId).reply_markup,
+            {
+              chat_id: chatId,
+              message_id: messageId,
+            }
+          );
+          console.log(
+            `[DEBUG] editMessageReplyMarkup succeeded for SETTINGS chatId=${chatId}`
+          );
+        } catch (e2) {
+          try {
+            console.error(
+              `[ERROR] editMessageReplyMarkup failed for SETTINGS:`,
+              e2?.response?.body || e2?.message || e2
+            );
+            console.log(
+              `[DEBUG] Sending new message for SETTINGS as last resort chatId=${chatId}`
+            );
+            await bot.sendMessage(chatId, "⚙️ TurboSol Settings", {
+              reply_markup: buildTurboSolSettingsMenu(chatId).reply_markup,
+            });
+          } catch (e3) {
+            console.error(
+              `[ERROR] sendMessage failed for SETTINGS:`,
+              e3?.response?.body || e3?.message || e3
+            );
+          }
+        }
+      }
+      return;
+    }
+    if (data === "AUTOMATION") {
+      try {
+        await bot.answerCallbackQuery(query.id, { text: "Automation" });
+      } catch {}
+      try {
+        await bot.editMessageText("🤖 Automation", {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildAutomationMenu(chatId).reply_markup,
+        });
+      } catch (e) {
+        await bot.sendMessage(chatId, "🤖 Automation", {
+          reply_markup: buildAutomationMenu(chatId).reply_markup,
         });
       }
-      if (data === "CLOSE_MENU") {
-        try {
-          await bot.deleteMessage(chatId, messageId);
-        } catch {}
-        return;
-      }
+      return;
+    }
 
-      if (data === "STOP_SNIPE") {
-        stopLiquidityWatch(chatId);
-        await bot.answerCallbackQuery(query.id, { text: "Stopped sniping" });
+    if (data === "REFRESH") {
+      const welcome = await buildTurboSolWelcomeMessage(chatId);
+      await bot.sendMessage(chatId, welcome);
+      return bot.sendMessage(chatId, "Choose an option:", {
+        reply_markup: buildMainMenu(chatId).reply_markup,
+      });
+    }
+
+    if (data === "CLOSE_MENU") {
+      try {
+        await bot.deleteMessage(chatId, messageId);
+      } catch {}
+      return;
+    }
+
+    if (data === "COPY_TRADE") {
+      await bot.sendMessage(
+        chatId,
+        "🤖 Copy Trade is coming soon. You'll be able to follow wallets and mirror their trades automatically.",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
+            ],
+          },
+        }
+      );
+      return;
+    }
+
+    if (data === "WITHDRAW") {
+      setPendingInput(chatId, { type: "WITHDRAW_DEST" });
+      await bot.sendMessage(
+        chatId,
+        "💸 Withdraw SOL\n\nPlease enter the destination Solana address:",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
+            ],
+          },
+        }
+      );
+      return;
+    }
+
+    if (data === "SUGGESTIONS") {
+      setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
+      await bot.sendMessage(
+        chatId,
+        "💡 Suggestions\n\nPlease send your idea or feedback as a message. We'll save it and review soon.",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
+            ],
+          },
+        }
+      );
+      return;
+    }
+
+    if (data === "STOP_SNIPE") {
+      stopLiquidityWatch(chatId);
+      await bot.answerCallbackQuery(query.id, { text: "Stopped sniping" });
+      await bot.sendMessage(
+        chatId,
+        "Stopped all active liquidity watches for this chat."
+      );
+      return;
+    }
+
+    if (data === "ACTIVE_SNIPES") {
+      try {
+        const items = await loadActiveSnipesByChat(chatId);
+        const lines = (items || []).map((i) => {
+          const shortMint = i.mint
+            ? i.mint.slice(0, 6) + "…" + i.mint.slice(-4)
+            : "?";
+          const started = i.startedAt
+            ? new Date(i.startedAt).toLocaleTimeString()
+            : "?";
+          return `• ${shortMint} — ${i.amountSol} SOL (since ${started})`;
+        });
+        const keyboard = [
+          ...(items || []).map((i) => [
+            {
+              text: `🛑 Stop ${i.mint.slice(0, 6)}…${i.mint.slice(-4)}`,
+              callback_data: `STOP_SNIPE_BY_${i.mint}`,
+            },
+          ]),
+          [{ text: "⛔ Stop All", callback_data: "STOP_SNIPE" }],
+          [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
+        ];
+        const body = lines.length
+          ? `📋 Active Snipes (${lines.length})\n\n${lines.join("\n")}`
+          : "No active snipes for this chat.";
+        try {
+          await bot.editMessageText(body, {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: { inline_keyboard: keyboard },
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, body, {
+            reply_markup: { inline_keyboard: keyboard },
+          });
+        }
+      } catch (e) {
+        await bot.answerCallbackQuery(query.id, { text: "Failed to load" });
+      }
+      return;
+    }
+
+    if (data.startsWith("STOP_SNIPE_BY_")) {
+      const mint = data.replace("STOP_SNIPE_BY_", "");
+      try {
+        stopLiquidityWatch(chatId, mint);
+        try {
+          await markSnipeCancelled(chatId, mint, "stopped_by_user");
+        } catch {}
+        await bot.answerCallbackQuery(query.id, {
+          text: `Stopped ${mint.slice(0, 6)}…${mint.slice(-4)}`,
+        });
+      } catch (e) {
+        await bot.answerCallbackQuery(query.id, { text: "Failed to stop" });
+      }
+      // Refresh the active snipes view
+      try {
+        const items = await loadActiveSnipesByChat(chatId);
+        const lines = (items || []).map((i) => {
+          const shortMint = i.mint
+            ? i.mint.slice(0, 6) + "…" + i.mint.slice(-4)
+            : "?";
+          const started = i.startedAt
+            ? new Date(i.startedAt).toLocaleTimeString()
+            : "?";
+          return `• ${shortMint} — ${i.amountSol} SOL (since ${started})`;
+        });
+        const keyboard = [
+          ...(items || []).map((i) => [
+            {
+              text: `🛑 Stop ${i.mint.slice(0, 6)}…${i.mint.slice(-4)}`,
+              callback_data: `STOP_SNIPE_BY_${i.mint}`,
+            },
+          ]),
+          [{ text: "⛔ Stop All", callback_data: "STOP_SNIPE" }],
+          [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
+        ];
+        const body = lines.length
+          ? `📋 Active Snipes (${lines.length})\n\n${lines.join("\n")}`
+          : "No active snipes for this chat.";
+        try {
+          await bot.editMessageText(body, {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: { inline_keyboard: keyboard },
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, body, {
+            reply_markup: { inline_keyboard: keyboard },
+          });
+        }
+      } catch {}
+      return;
+    }
+    if (data === "QUICK_BUY") {
+      try {
+        await bot.answerCallbackQuery(query.id, { text: "Quick Buy" });
+        if (!(await hasUserWallet(chatId))) {
+          await bot.sendMessage(
+            chatId,
+            "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
+          );
+          return;
+        }
+        setPendingInput(chatId, { type: "QUICK_BUY_TOKEN" });
         await bot.sendMessage(
           chatId,
-          "Stopped all active liquidity watches for this chat."
+          "💰 Quick Buy\n\nPlease send the token address (mint) you want to buy:"
         );
-        return;
+      } catch (e) {
+        await bot.sendMessage(chatId, `Quick Buy failed: ${e?.message || e}`);
       }
+      return;
+    }
 
-      if (data === "ACTIVE_SNIPES") {
-        try {
-          const items = await loadActiveSnipesByChat(chatId);
-          const lines = (items || []).map((i) => {
-            const shortMint = i.mint
-              ? i.mint.slice(0, 6) + "…" + i.mint.slice(-4)
-              : "?";
-            const started = i.startedAt
-              ? new Date(i.startedAt).toLocaleTimeString()
-              : "?";
-            return `• ${shortMint} — ${i.amountSol} SOL (since ${started})`;
-          });
-          const keyboard = [
-            ...(items || []).map((i) => [
-              {
-                text: `🛑 Stop ${i.mint.slice(0, 6)}…${i.mint.slice(-4)}`,
-                callback_data: `STOP_SNIPE_BY_${i.mint}`,
-              },
-            ]),
-            [{ text: "⛔ Stop All", callback_data: "STOP_SNIPE" }],
-            [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
-          ];
-          const body = lines.length
-            ? `📋 Active Snipes (${lines.length})\n\n${lines.join("\n")}`
-            : "No active snipes for this chat.";
-          try {
-            await bot.editMessageText(body, {
-              chat_id: chatId,
-              message_id: messageId,
-              reply_markup: { inline_keyboard: keyboard },
-            });
-          } catch (e) {
-            await bot.sendMessage(chatId, body, {
-              reply_markup: { inline_keyboard: keyboard },
-            });
-          }
-        } catch (e) {
-          await bot.answerCallbackQuery(query.id, { text: "Failed to load" });
-        }
-        return;
-      }
-
-      if (data.startsWith("STOP_SNIPE_BY_")) {
-        const mint = data.replace("STOP_SNIPE_BY_", "");
-        try {
-          stopLiquidityWatch(chatId, mint);
-          try {
-            await markSnipeCancelled(chatId, mint, "stopped_by_user");
-          } catch {}
-          await bot.answerCallbackQuery(query.id, {
-            text: `Stopped ${mint.slice(0, 6)}…${mint.slice(-4)}`,
-          });
-        } catch (e) {
-          await bot.answerCallbackQuery(query.id, { text: "Failed to stop" });
-        }
-        // Refresh the active snipes view
-        try {
-          const items = await loadActiveSnipesByChat(chatId);
-          const lines = (items || []).map((i) => {
-            const shortMint = i.mint
-              ? i.mint.slice(0, 6) + "…" + i.mint.slice(-4)
-              : "?";
-            const started = i.startedAt
-              ? new Date(i.startedAt).toLocaleTimeString()
-              : "?";
-            return `• ${shortMint} — ${i.amountSol} SOL (since ${started})`;
-          });
-          const keyboard = [
-            ...(items || []).map((i) => [
-              {
-                text: `🛑 Stop ${i.mint.slice(0, 6)}…${i.mint.slice(-4)}`,
-                callback_data: `STOP_SNIPE_BY_${i.mint}`,
-              },
-            ]),
-            [{ text: "⛔ Stop All", callback_data: "STOP_SNIPE" }],
-            [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
-          ];
-          const body = lines.length
-            ? `📋 Active Snipes (${lines.length})\n\n${lines.join("\n")}`
-            : "No active snipes for this chat.";
-          try {
-            await bot.editMessageText(body, {
-              chat_id: chatId,
-              message_id: messageId,
-              reply_markup: { inline_keyboard: keyboard },
-            });
-          } catch (e) {
-            await bot.sendMessage(chatId, body, {
-              reply_markup: { inline_keyboard: keyboard },
-            });
-          }
-        } catch {}
-        return;
-      }
-      if (data === "QUICK_BUY") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Quick Buy" });
-          if (!(await hasUserWallet(chatId))) {
-            await bot.sendMessage(
-              chatId,
-              "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
-            );
-            return;
-          }
-          setPendingInput(chatId, { type: "QUICK_BUY_TOKEN" });
+    if (data === "QUICK_SELL") {
+      try {
+        await bot.answerCallbackQuery(query.id, { text: "Quick Sell" });
+        if (!(await hasUserWallet(chatId))) {
           await bot.sendMessage(
             chatId,
-            "💰 Quick Buy\n\nPlease send the token address (mint) you want to buy:"
+            "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
           );
-        } catch (e) {
-          await bot.sendMessage(chatId, `Quick Buy failed: ${e?.message || e}`);
+          return;
         }
-        return;
-      }
-
-      if (data === "QUICK_SELL") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Quick Sell" });
-          if (!(await hasUserWallet(chatId))) {
-            await bot.sendMessage(
-              chatId,
-              "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
-            );
-            return;
-          }
-          // Fetch user's SPL tokens with balances (cached)
-          const items = await getWalletSellTokens(chatId);
-          if (!items.length) {
-            const keyboard = [
-              [
-                { text: "🔄 Refresh", callback_data: "QUICK_SELL" },
-                { text: "🏠 Main", callback_data: "MAIN_MENU" },
-              ],
-            ];
-            await bot.sendMessage(
-              chatId,
-              "😕 No SPL tokens with balance found in your wallet. If you recently received tokens, tap Refresh (RPC may be slightly delayed).",
-              { reply_markup: { inline_keyboard: keyboard } }
-            );
-            return;
-          }
-          // Build selection keyboard (top 10 by balance)
-          const top = items.slice(0, 10);
-          const keyboard = top.map((t) => {
-            const mint = t.mint;
-            const sym = (t.symbol || "").toString().slice(0, 12);
-            const bal = Number(t.uiAmount || 0).toFixed(4);
-            const label = sym
-              ? `${sym} • ${bal}`
-              : `${mint.slice(0, 4)}…${mint.slice(-4)} • ${bal}`;
-            return [{ text: label, callback_data: `SELL_PICK_${mint}` }];
-          });
-          keyboard.push([
-            { text: "🔄 Refresh", callback_data: "QUICK_SELL" },
-            { text: "🏠 Main", callback_data: "MAIN_MENU" },
-          ]);
-          await bot.sendMessage(
-            chatId,
-            "💸 Quick Sell — Select a token to sell:",
-            {
-              reply_markup: { inline_keyboard: keyboard },
-            }
-          );
-        } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            `Quick Sell failed: ${e?.message || e}`
-          );
-        }
-        return;
-      }
-
-      if (data.startsWith("SELL_PICK_")) {
-        try {
-          const mint = data.slice("SELL_PICK_".length);
-          // Set pending percent input for chosen token
-          setPendingInput(chatId, {
-            type: "QUICK_SELL_PERCENT",
-            tokenAddress: mint,
-          });
-          // Try to enrich with cached token info
-          let title = mint;
-          try {
-            const list = await getWalletSellTokens(chatId);
-            const found = list.find((x) => x.mint === mint);
-            if (found) {
-              const sym = (found.symbol || "TOKEN").toString().slice(0, 12);
-              const bal = Number(found.uiAmount || 0).toFixed(4);
-              title = `${sym} (${mint.slice(0, 4)}…${mint.slice(
-                -4
-              )}) — bal ${bal}`;
-            }
-          } catch {}
+        // Fetch user's SPL tokens with balances (cached)
+        const items = await getWalletSellTokens(chatId);
+        if (!items.length) {
           const keyboard = [
             [
-              { text: "25%", callback_data: `SELL_PCT_25_${mint}` },
-              { text: "50%", callback_data: `SELL_PCT_50_${mint}` },
-              { text: "100%", callback_data: `SELL_PCT_100_${mint}` },
-            ],
-            [
-              { text: "🔙 Back", callback_data: "QUICK_SELL" },
+              { text: "🔄 Refresh", callback_data: "QUICK_SELL" },
               { text: "🏠 Main", callback_data: "MAIN_MENU" },
             ],
           ];
           await bot.sendMessage(
             chatId,
-            `✅ Selected: ${title}\n\nSend a number 1-100 for custom percent, or tap a quick option below:`,
+            "😕 No SPL tokens with balance found in your wallet. If you recently received tokens, tap Refresh (RPC may be slightly delayed).",
             { reply_markup: { inline_keyboard: keyboard } }
-          );
-        } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            `❌ Could not prepare sell: ${e?.message || e}`
-          );
-        }
-        return;
-      }
-
-      if (data.startsWith("SELL_PCT_")) {
-        try {
-          const rest = data.slice("SELL_PCT_".length); // <pct>_<mint>
-          const [pctStr, mint] = rest.split("_");
-          const percent = Math.max(
-            1,
-            Math.min(100, parseInt(pctStr, 10) || 100)
-          );
-          if (!canProceed(chatId, "QUICK_SELL_EXECUTE", 1600)) {
-            await bot.answerCallbackQuery(query.id, { text: "Please wait…" });
-            return;
-          }
-          if (!(await hasUserWallet(chatId))) {
-            await bot.answerCallbackQuery(query.id, {
-              text: "No wallet linked",
-            });
-            await bot.sendMessage(
-              chatId,
-              "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet."
-            );
-            return;
-          }
-          await bot.answerCallbackQuery(query.id, {
-            text: `Selling ${percent}%`,
-          });
-          const priorityFeeLamports = getPriorityFeeLamports();
-          const useJitoBundle = getUseJitoBundle();
-          await bot.sendMessage(
-            chatId,
-            `⏳ Placing quick sell of ${percent}% for token ${mint}...`
-          );
-          const sellRes = await quickSell({
-            tokenMint: mint,
-            percent,
-            priorityFeeLamports,
-            useJitoBundle,
-            chatId,
-          });
-          setPendingInput(chatId, null);
-          const txid =
-            sellRes?.txid ||
-            (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
-          const solscan = `https://solscan.io/tx/${txid}`;
-          const solOut =
-            typeof sellRes?.output?.tokensOut === "number"
-              ? sellRes.output.tokensOut.toFixed(6)
-              : "?";
-          const impact =
-            typeof sellRes?.route?.priceImpactPct === "number"
-              ? `${(sellRes.route.priceImpactPct * 100).toFixed(2)}%`
-              : "?";
-          await bot.sendMessage(
-            chatId,
-            `✅ Sell sent\n• Token: ${mint}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${
-              sellRes?.route?.labels || "route"
-            }\n• Price impact: ${impact}\n• Slippage: ${
-              sellRes?.slippageBps
-            } bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${
-              sellRes?.via
-            }\n• Latency: ${
-              sellRes?.latencyMs
-            } ms\n• Tx: ${txid}\n🔗 ${solscan}`
-          );
-          // Record sell trade log with racing telemetry
-          addTradeLog(chatId, {
-            kind: "sell",
-            mint,
-            percent,
-            sol: Number(sellRes?.output?.tokensOut ?? NaN),
-            route: sellRes?.route?.labels,
-            priceImpactPct: sellRes?.route?.priceImpactPct ?? null,
-            slippageBps: sellRes?.slippageBps,
-            priorityFeeLamports: sellRes?.priorityFeeLamports,
-            via: sellRes?.via,
-            latencyMs: sellRes?.latencyMs,
-            txid,
-            lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
-            lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
-            lastSendRaceLatencyMs: sellRes?.lastSendRaceLatencyMs ?? null,
-          });
-          // Follow-up: notify on confirmation or failure
-          notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(() => {});
-        } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            `❌ Quick Sell failed: ${e?.message || e}`
-          );
-        }
-        return;
-      }
-
-      if (data === "SNIPE_LP") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Snipe LP Add" });
-          if (!(await hasUserWallet(chatId))) {
-            await bot.sendMessage(
-              chatId,
-              "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
-            );
-            return;
-          }
-          setPendingInput(chatId, { type: "SNIPE_LP_TOKEN" });
-          await bot.sendMessage(
-            chatId,
-            "🎯 Snipe LP Add\n\nPlease send the token address (mint) you want to snipe:"
-          );
-        } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            `Snipe LP Add failed: ${e?.message || e}`
-          );
-        }
-        return;
-      }
-
-      if (data === "QUOTE") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Quote" });
-          if (!(await hasUserWallet(chatId))) {
-            await bot.sendMessage(
-              chatId,
-              "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
-            );
-            return;
-          }
-          setPendingInput(chatId, { type: "QUOTE_TOKEN" });
-          await bot.sendMessage(
-            chatId,
-            "💰 Quote Token\n\nPlease send the token address (mint) you want to quote:"
-          );
-        } catch (e) {
-          await bot.sendMessage(chatId, `Quote failed: ${e?.message || e}`);
-        }
-        return;
-      }
-
-      if (data === "HELP") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Help" });
-          const helpText = `🚀 **TurboSol Help**\n\n**Main Commands:**\n• /start - Initialize the bot\n• /setup - Create new wallet\n• /import <privateKey> - Import existing wallet\n• /address - Show wallet address
-• /lasttx [n] - Show last n transactions (max 5)
-
-**Quick Actions:**\n• **Wallet** - Manage your wallets\n• **Quick Buy** - Buy tokens with default settings\n• **Snipe LP Add** - Snipe tokens when liquidity is added\n• **Quote** - Get token price quotes\n\n**Text Commands:**\n• Send token address to get buy/snipe options\n• \`quote <mint> <sol_amount>\` - Get price quote\n• \`buy <mint> <sol_amount>\` - Buy tokens\n• \`snipe <mint> <sol_amount>\` - Start sniping\n\n**Settings:**\n• \`fee <lamports>\` - Set priority fee\n• \`jito on/off\` - Toggle Jito bundling\n• \`tier\` - View current tier and limits\n\n**Automation:**\n• Open the Automation menu to toggle Pump.fun launch alerts and more.\n\nFor more help, contact support.`;
-          await bot.sendMessage(chatId, helpText, { parse_mode: "Markdown" });
-        } catch (e) {
-          await bot.sendMessage(chatId, `Help failed: ${e?.message || e}`);
-        }
-        return;
-      }
-
-      // Start Buy/Quote flows from detected mint by asking for amount first
-      if (data.startsWith("START_BUY_")) {
-        const mint = data.slice("START_BUY_".length);
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Buy" });
-          const state = getUserState(chatId);
-          const defaultBuy = state.defaultBuySol ?? 0.05;
-          if (!(await hasUserWallet(chatId))) {
-            await bot.sendMessage(
-              chatId,
-              "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
-            );
-            return;
-          }
-          setPendingInput(chatId, {
-            type: "QUICK_BUY_AMOUNT",
-            tokenAddress: mint,
-          });
-          await bot.sendMessage(
-            chatId,
-            `💰 Quick Buy - ${mint}\n\nPlease enter the amount in SOL you want to buy (default: ${defaultBuy} SOL):`
-          );
-        } catch (e) {
-          await bot.sendMessage(chatId, `Buy start failed: ${e?.message || e}`);
-        }
-        return;
-      }
-
-      if (data.startsWith("START_QUOTE_")) {
-        const mint = data.slice("START_QUOTE_".length);
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Quote" });
-          const state = getUserState(chatId);
-          const defaultBuy = state.defaultBuySol ?? 0.05;
-          setPendingInput(chatId, { type: "QUOTE_AMOUNT", tokenAddress: mint });
-          // Enrich with token name/symbol for prompt
-          let tokenNameSym = mint;
-          try {
-            const meta = await getTokenMeta(mint);
-            const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
-            const name = meta?.name ? String(meta.name).slice(0, 20) : null;
-            if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
-          } catch {}
-          await bot.sendMessage(
-            chatId,
-            `💰 Quote - ${tokenNameSym}\n\nEnter amount in SOL to quote (default: ${defaultBuy} SOL):`
-          );
-        } catch (e) {
-          await bot.sendMessage(
-            chatId,
-            `Quote start failed: ${e?.message || e}`
-          );
-        }
-        return;
-      }
-      if (data.startsWith("AUTO_QUOTE_")) {
-        try {
-          if (!canProceed(chatId, "AUTO_QUOTE", 700)) {
-            await bot.answerCallbackQuery(query.id, { text: "Please wait…" });
-            return;
-          }
-          const rest = data.slice("AUTO_QUOTE_".length);
-          const [mint, amtStr] = rest.split("_");
-          const amountSol = parseFloat(amtStr);
-          try { const s = getUserState(chatId); s.lastAmounts = s.lastAmounts || {}; s.lastAmounts[mint] = amountSol; } catch {}
-          const res = await getTokenQuote({
-            inputMint: "So11111111111111111111111111111111111111112",
-            outputMint: mint,
-            amountSol,
-          });
-          console.log("[DEBUG] Quote Result:", res);
-          console.log("[TELEGRAM] Quote Validation:", {
-            outAmount: res?.route?.outAmount,
-            outAmountFormatted: res?.outAmountFormatted,
-          });
-
-          if (!res || res.outAmountFormatted == null) {
-            await bot.answerCallbackQuery(query.id, { text: "Quote failed" });
-            return;
-          }
-
-          // Enrich with token name/symbol
-          let tokenNameSym = mint;
-          try {
-            const meta = await getTokenMeta(mint);
-            const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
-            const name = meta?.name ? String(meta.name).slice(0, 20) : null;
-            if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
-          } catch {}
-          await bot.sendMessage(
-            chatId,
-            `Quote for ${amountSol} SOL -> ${tokenNameSym}: ${res.outAmountFormatted} tokens (impact ${res.priceImpactPct}%)`,
-            {
-              reply_markup: {
-                inline_keyboard: [
-                  [
-                    {
-                      text: "Buy",
-                      callback_data: `AUTO_BUY_${mint}_${amountSol}`,
-                    },
-                    {
-                      text: "Re-Quote",
-                      callback_data: `AUTO_QUOTE_${mint}_${amountSol}`,
-                    },
-                  ],
-                  [
-                    { text: "Re-Buy (edit amount)", callback_data: `REBUY_${mint}` },
-                    { text: "Re-Quote (edit amount)", callback_data: `REQUOTE_${mint}` },
-                  ],
-                ],
-              },
-            }
-          );
-        } catch (e) {
-          console.error("Auto quote failed:", e);
-          await bot.answerCallbackQuery(query.id, { text: "Quote error" });
-          await bot.sendMessage(chatId, `❌ Quote failed: ${e?.message || e}`);
-        }
-        return;
-      }
-
-      if (data.startsWith("AUTO_BUY_")) {
-        const rest = data.slice("AUTO_BUY_".length);
-        const [mint, amtStr] = rest.split("_");
-        const amountSol = parseFloat(amtStr);
-        try { const s = getUserState(chatId); s.lastAmounts = s.lastAmounts || {}; s.lastAmounts[mint] = amountSol; } catch {}
-        if (!(await hasUserWallet(chatId))) {
-          await bot.answerCallbackQuery(query.id, { text: "No wallet linked" });
-          await bot.sendMessage(
-            chatId,
-            `No wallet linked. Use /setup to create or /import <privateKeyBase58>.`
           );
           return;
         }
-        // Enforce daily spend cap for AUTO_BUY
+        // Build selection keyboard (top 10 by balance)
+        const top = items.slice(0, 10);
+        const keyboard = top.map((t) => {
+          const mint = t.mint;
+          const sym = (t.symbol || "").toString().slice(0, 12);
+          const bal = Number(t.uiAmount || 0).toFixed(4);
+          const label = sym
+            ? `${sym} • ${bal}`
+            : `${mint.slice(0, 4)}…${mint.slice(-4)} • ${bal}`;
+          return [{ text: label, callback_data: `SELL_PICK_${mint}` }];
+        });
+        keyboard.push([
+          { text: "🔄 Refresh", callback_data: "QUICK_SELL" },
+          { text: "🏠 Main", callback_data: "MAIN_MENU" },
+        ]);
+        await bot.sendMessage(
+          chatId,
+          "💸 Quick Sell — Select a token to sell:",
+          {
+            reply_markup: { inline_keyboard: keyboard },
+          }
+        );
+      } catch (e) {
+        await bot.sendMessage(chatId, `Quick Sell failed: ${e?.message || e}`);
+      }
+      return;
+    }
+
+    if (data.startsWith("SELL_PICK_")) {
+      try {
+        const mint = data.slice("SELL_PICK_".length);
+        // Set pending percent input for chosen token
+        setPendingInput(chatId, {
+          type: "QUICK_SELL_PERCENT",
+          tokenAddress: mint,
+        });
+        // Try to enrich with cached token info
+        let title = mint;
         try {
-          const cap = getDailyCap(chatId);
-          const spent = getDailySpent(chatId);
-          const remaining = getRemainingDailyCap(chatId);
-          if (Number.isFinite(cap) && amountSol > remaining + 1e-9) {
-            await bot.answerCallbackQuery(query.id, { text: "Daily cap reached" });
-            await bot.sendMessage(
-              chatId,
-              `🚫 Daily spend cap reached. Tier: ${getUserState(chatId).tier}. Cap: ${cap} SOL. Spent today: ${spent.toFixed(4)} SOL. Remaining: ${Math.max(0, remaining).toFixed(4)} SOL.`
-            );
-            return;
+          const list = await getWalletSellTokens(chatId);
+          const found = list.find((x) => x.mint === mint);
+          if (found) {
+            const sym = (found.symbol || "TOKEN").toString().slice(0, 12);
+            const bal = Number(found.uiAmount || 0).toFixed(4);
+            title = `${sym} (${mint.slice(0, 4)}…${mint.slice(
+              -4
+            )}) — bal ${bal}`;
           }
         } catch {}
-        // Optional risk check gate
-        try {
-          const requireLpLock =
-            String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() ===
-              "true" || process.env.REQUIRE_LP_LOCK === "1";
-          const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
-          const risk = await riskCheckToken(mint, {
-            requireLpLock,
-            maxBuyTaxBps,
+        const keyboard = [
+          [
+            { text: "25%", callback_data: `SELL_PCT_25_${mint}` },
+            { text: "50%", callback_data: `SELL_PCT_50_${mint}` },
+            { text: "100%", callback_data: `SELL_PCT_100_${mint}` },
+          ],
+          [
+            { text: "🔙 Back", callback_data: "QUICK_SELL" },
+            { text: "🏠 Main", callback_data: "MAIN_MENU" },
+          ],
+        ];
+        await bot.sendMessage(
+          chatId,
+          `✅ Selected: ${title}\n\nSend a number 1-100 for custom percent, or tap a quick option below:`,
+          { reply_markup: { inline_keyboard: keyboard } }
+        );
+      } catch (e) {
+        await bot.sendMessage(
+          chatId,
+          `❌ Could not prepare sell: ${e?.message || e}`
+        );
+      }
+      return;
+    }
+
+    if (data.startsWith("SELL_PCT_")) {
+      try {
+        const rest = data.slice("SELL_PCT_".length); // <pct>_<mint>
+        const [pctStr, mint] = rest.split("_");
+        const percent = Math.max(1, Math.min(100, parseInt(pctStr, 10) || 100));
+        if (!canProceed(chatId, "QUICK_SELL_EXECUTE", 1600)) {
+          await bot.answerCallbackQuery(query.id, { text: "Please wait…" });
+          return;
+        }
+        if (!(await hasUserWallet(chatId))) {
+          await bot.answerCallbackQuery(query.id, {
+            text: "No wallet linked",
           });
-          if (!risk.ok) {
-            await bot.answerCallbackQuery(query.id, {
-              text: "Blocked by risk checks",
-            });
-            await bot.sendMessage(
-              chatId,
-              `🚫 Trade blocked: ${risk.reasons?.join("; ")}`
-            );
-            return;
-          }
+          await bot.sendMessage(
+            chatId,
+            "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet."
+          );
+          return;
+        }
+        await bot.answerCallbackQuery(query.id, {
+          text: `Selling ${percent}%`,
+        });
+        const priorityFeeLamports = getPriorityFeeLamports();
+        const useJitoBundle = getUseJitoBundle();
+        await bot.sendMessage(
+          chatId,
+          `⏳ Placing quick sell of ${percent}% for token ${mint}...`
+        );
+        const sellRes = await quickSell({
+          tokenMint: mint,
+          percent,
+          priorityFeeLamports,
+          useJitoBundle,
+          chatId,
+        });
+        setPendingInput(chatId, null);
+        const txid =
+          sellRes?.txid ||
+          (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
+        const solscan = `https://solscan.io/tx/${txid}`;
+        const solOut =
+          typeof sellRes?.output?.tokensOut === "number"
+            ? sellRes.output.tokensOut.toFixed(6)
+            : "?";
+        const impact =
+          typeof sellRes?.route?.priceImpactPct === "number"
+            ? `${(sellRes.route.priceImpactPct * 100).toFixed(2)}%`
+            : "?";
+        await bot.sendMessage(
+          chatId,
+          `✅ Sell sent\n• Token: ${mint}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${
+            sellRes?.route?.labels || "route"
+          }\n• Price impact: ${impact}\n• Slippage: ${
+            sellRes?.slippageBps
+          } bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${
+            sellRes?.via
+          }\n• Latency: ${sellRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`
+        );
+        // Record sell trade log with racing telemetry
+        addTradeLog(chatId, {
+          kind: "sell",
+          mint,
+          percent,
+          sol: Number(sellRes?.output?.tokensOut ?? NaN),
+          route: sellRes?.route?.labels,
+          priceImpactPct: sellRes?.route?.priceImpactPct ?? null,
+          slippageBps: sellRes?.slippageBps,
+          priorityFeeLamports: sellRes?.priorityFeeLamports,
+          via: sellRes?.via,
+          latencyMs: sellRes?.latencyMs,
+          txid,
+          lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
+          lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
+          lastSendRaceLatencyMs: sellRes?.lastSendRaceLatencyMs ?? null,
+        });
+        // Follow-up: notify on confirmation or failure
+        notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(() => {});
+      } catch (e) {
+        await bot.sendMessage(
+          chatId,
+          `❌ Quick Sell failed: ${e?.message || e}`
+        );
+      }
+      return;
+    }
+
+    if (data === "SNIPE_LP") {
+      try {
+        await bot.answerCallbackQuery(query.id, { text: "Snipe LP Add" });
+        if (!(await hasUserWallet(chatId))) {
+          await bot.sendMessage(
+            chatId,
+            "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
+          );
+          return;
+        }
+        setPendingInput(chatId, { type: "SNIPE_LP_TOKEN" });
+        await bot.sendMessage(
+          chatId,
+          "🎯 Snipe LP Add\n\nPlease send the token address (mint) you want to snipe:"
+        );
+      } catch (e) {
+        await bot.sendMessage(
+          chatId,
+          `Snipe LP Add failed: ${e?.message || e}`
+        );
+      }
+      return;
+    }
+
+    if (data === "QUOTE") {
+      try {
+        await bot.answerCallbackQuery(query.id, { text: "Quote" });
+        if (!(await hasUserWallet(chatId))) {
+          await bot.sendMessage(
+            chatId,
+            "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
+          );
+          return;
+        }
+        setPendingInput(chatId, { type: "QUOTE_TOKEN" });
+        await bot.sendMessage(
+          chatId,
+          "💰 Quote Token\n\nPlease send the token address (mint) you want to quote:"
+        );
+      } catch (e) {
+        await bot.sendMessage(chatId, `Quote failed: ${e?.message || e}`);
+      }
+      return;
+    }
+
+    if (data === "HELP") {
+      try {
+        await bot.answerCallbackQuery(query.id, { text: "Help" });
+        const helpText = `🚀 **TurboSol Help**\n\n**Main Commands:**\n• /start - Initialize the bot\n• /setup - Create new wallet\n• /import <privateKey> - Import existing wallet\n• /address - Show wallet address
+• /lasttx [n] - Show last n transactions (max 5)
+
+**Quick Actions:**\n• **Wallet** - Manage your wallets\n• **Quick Buy** - Buy tokens with default settings\n• **Snipe LP Add** - Snipe tokens when liquidity is added\n• **Quote** - Get token price quotes\n\n**Text Commands:**\n• Send token address to get buy/snipe options\n• \`quote <mint> <sol_amount>\` - Get price quote\n• \`buy <mint> <sol_amount>\` - Buy tokens\n• \`snipe <mint> <sol_amount>\` - Start sniping\n\n**Settings:**\n• \`fee <lamports>\` - Set priority fee\n• \`jito on/off\` - Toggle Jito bundling\n• \`tier\` - View current tier and limits\n\n**Automation:**\n• Open the Automation menu to toggle Pump.fun launch alerts and more.\n\nFor more help, contact support.`;
+        await bot.sendMessage(chatId, helpText, { parse_mode: "Markdown" });
+      } catch (e) {
+        await bot.sendMessage(chatId, `Help failed: ${e?.message || e}`);
+      }
+      return;
+    }
+
+    // Start Buy/Quote flows from detected mint by asking for amount first
+    if (data.startsWith("START_BUY_")) {
+      const mint = data.slice("START_BUY_".length);
+      try {
+        await bot.answerCallbackQuery(query.id, { text: "Buy" });
+        const state = getUserState(chatId);
+        const defaultBuy = state.defaultBuySol ?? 0.05;
+        if (!(await hasUserWallet(chatId))) {
+          await bot.sendMessage(
+            chatId,
+            "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
+          );
+          return;
+        }
+        setPendingInput(chatId, {
+          type: "QUICK_BUY_AMOUNT",
+          tokenAddress: mint,
+        });
+        await bot.sendMessage(
+          chatId,
+          `💰 Quick Buy - ${mint}\n\nPlease enter the amount in SOL you want to buy (default: ${defaultBuy} SOL):`
+        );
+      } catch (e) {
+        await bot.sendMessage(chatId, `Buy start failed: ${e?.message || e}`);
+      }
+      return;
+    }
+
+    if (data.startsWith("START_QUOTE_")) {
+      const mint = data.slice("START_QUOTE_".length);
+      try {
+        await bot.answerCallbackQuery(query.id, { text: "Quote" });
+        const state = getUserState(chatId);
+        const defaultBuy = state.defaultBuySol ?? 0.05;
+        setPendingInput(chatId, { type: "QUOTE_AMOUNT", tokenAddress: mint });
+        // Enrich with token name/symbol for prompt
+        let tokenNameSym = mint;
+        try {
+          const meta = await getTokenMeta(mint);
+          const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
+          const name = meta?.name ? String(meta.name).slice(0, 20) : null;
+          if (sym || name)
+            tokenNameSym = `${name || ""}${name && sym ? " " : ""}${
+              sym ? `(${sym})` : ""
+            }`.trim();
         } catch {}
-        const swapPromise = performSwap({
+        await bot.sendMessage(
+          chatId,
+          `💰 Quote - ${tokenNameSym}\n\nEnter amount in SOL to quote (default: ${defaultBuy} SOL):`
+        );
+      } catch (e) {
+        await bot.sendMessage(chatId, `Quote start failed: ${e?.message || e}`);
+      }
+      return;
+    }
+    if (data.startsWith("AUTO_QUOTE_")) {
+      try {
+        if (!canProceed(chatId, "AUTO_QUOTE", 700)) {
+          await bot.answerCallbackQuery(query.id, { text: "Please wait…" });
+          return;
+        }
+        const rest = data.slice("AUTO_QUOTE_".length);
+        const [mint, amtStr] = rest.split("_");
+        const amountSol = parseFloat(amtStr);
+        try {
+          const s = getUserState(chatId);
+          s.lastAmounts = s.lastAmounts || {};
+          s.lastAmounts[mint] = amountSol;
+        } catch {}
+        const res = await getTokenQuote({
           inputMint: "So11111111111111111111111111111111111111112",
           outputMint: mint,
           amountSol,
-          chatId,
         });
+        console.log("[DEBUG] Quote Result:", res);
+        console.log("[TELEGRAM] Quote Validation:", {
+          outAmount: res?.route?.outAmount,
+          outAmountFormatted: res?.outAmountFormatted,
+        });
+
+        if (!res || res.outAmountFormatted == null) {
+          await bot.answerCallbackQuery(query.id, { text: "Quote failed" });
+          return;
+        }
+
+        // Enrich with token name/symbol
+        let tokenNameSym = mint;
         try {
-          const TIMEOUT_MS = Number(process.env.SWAP_TIMEOUT_MS || 18000);
-          const swapRes = await promiseWithTimeout(
-            swapPromise,
-            TIMEOUT_MS,
-            "swap_timeout"
-          );
-          const txid = swapRes?.txid;
-          const solscan = `https://solscan.io/tx/${txid}`;
-          const tokOut =
-            typeof swapRes?.output?.tokensOut === "number"
-              ? swapRes.output.tokensOut.toFixed(4)
-              : "?";
-          const impact =
-            swapRes?.route?.priceImpactPct != null
-              ? `${swapRes.route.priceImpactPct}%`
-              : "?";
-          const symbol = swapRes?.output?.symbol || "TOKEN";
+          const meta = await getTokenMeta(mint);
+          const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
+          const name = meta?.name ? String(meta.name).slice(0, 20) : null;
+          if (sym || name)
+            tokenNameSym = `${name || ""}${name && sym ? " " : ""}${
+              sym ? `(${sym})` : ""
+            }`.trim();
+        } catch {}
+        await bot.sendMessage(
+          chatId,
+          `Quote for ${amountSol} SOL -> ${tokenNameSym}: ${res.outAmountFormatted} tokens (impact ${res.priceImpactPct}%)`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "Buy",
+                    callback_data: `AUTO_BUY_${mint}_${amountSol}`,
+                  },
+                  {
+                    text: "Re-Quote",
+                    callback_data: `AUTO_QUOTE_${mint}_${amountSol}`,
+                  },
+                ],
+                [
+                  {
+                    text: "Re-Buy (edit amount)",
+                    callback_data: `REBUY_${mint}`,
+                  },
+                  {
+                    text: "Re-Quote (edit amount)",
+                    callback_data: `REQUOTE_${mint}`,
+                  },
+                ],
+              ],
+            },
+          }
+        );
+      } catch (e) {
+        console.error("Auto quote failed:", e);
+        await bot.answerCallbackQuery(query.id, { text: "Quote error" });
+        await bot.sendMessage(chatId, `❌ Quote failed: ${e?.message || e}`);
+      }
+      return;
+    }
+
+    if (data.startsWith("AUTO_BUY_")) {
+      const rest = data.slice("AUTO_BUY_".length);
+      const [mint, amtStr] = rest.split("_");
+      const amountSol = parseFloat(amtStr);
+      try {
+        const s = getUserState(chatId);
+        s.lastAmounts = s.lastAmounts || {};
+        s.lastAmounts[mint] = amountSol;
+      } catch {}
+      if (!(await hasUserWallet(chatId))) {
+        await bot.answerCallbackQuery(query.id, { text: "No wallet linked" });
+        await bot.sendMessage(
+          chatId,
+          `No wallet linked. Use /setup to create or /import <privateKeyBase58>.`
+        );
+        return;
+      }
+      // Enforce daily spend cap for AUTO_BUY
+      try {
+        const cap = getDailyCap(chatId);
+        const spent = getDailySpent(chatId);
+        const remaining = getRemainingDailyCap(chatId);
+        if (Number.isFinite(cap) && amountSol > remaining + 1e-9) {
+          await bot.answerCallbackQuery(query.id, {
+            text: "Daily cap reached",
+          });
           await bot.sendMessage(
             chatId,
-            `✅ Buy sent\n• Token: ${symbol} (${mint})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${
-              swapRes?.route?.labels || "route"
-            }\n• Price impact: ${impact}\n• Slippage: ${
-              swapRes?.slippageBps
-            } bps\n• Priority fee: ${swapRes?.priorityFeeLamports}\n• Via: ${
-              swapRes?.via
-            }\n• Latency: ${
-              swapRes?.latencyMs
-            } ms\n• Tx: ${txid}\n🔗 ${solscan}`,
-            {
-              reply_markup: {
-                inline_keyboard: [
-                  [
-                    { text: "Re-Buy", callback_data: `AUTO_BUY_${mint}_${amountSol}` },
-                    { text: "Re-Quote", callback_data: `AUTO_QUOTE_${mint}_${amountSol}` },
-                  ],
-                  [
-                    { text: "Re-Buy (edit amount)", callback_data: `REBUY_${mint}` },
-                    { text: "Re-Quote (edit amount)", callback_data: `REQUOTE_${mint}` },
-                  ],
-                ],
-              },
-            }
+            `🚫 Daily spend cap reached. Tier: ${
+              getUserState(chatId).tier
+            }. Cap: ${cap} SOL. Spent today: ${spent.toFixed(
+              4
+            )} SOL. Remaining: ${Math.max(0, remaining).toFixed(4)} SOL.`
           );
-          // Record buy trade log with racing telemetry
-          addTradeLog(chatId, {
-            kind: "buy",
-            mint,
-            sol: Number(amountSol),
-            tokens: Number(swapRes?.output?.tokensOut ?? NaN),
-            route: swapRes?.route?.labels,
-            priceImpactPct: swapRes?.route?.priceImpactPct ?? null,
-            slippageBps: swapRes?.slippageBps,
-            priorityFeeLamports: swapRes?.priorityFeeLamports,
-            via: swapRes?.via,
-            latencyMs: swapRes?.latencyMs,
-            txid,
-            lastSendRaceWinner: swapRes?.lastSendRaceWinner ?? null,
-            lastSendRaceAttempts: swapRes?.lastSendRaceAttempts ?? 0,
-            lastSendRaceLatencyMs: swapRes?.lastSendRaceLatencyMs ?? null,
+          return;
+        }
+      } catch {}
+      // Optional risk check gate
+      try {
+        const requireLpLock =
+          String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() === "true" ||
+          process.env.REQUIRE_LP_LOCK === "1";
+        const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
+        const risk = await riskCheckToken(mint, {
+          requireLpLock,
+          maxBuyTaxBps,
+        });
+        if (!risk.ok) {
+          await bot.answerCallbackQuery(query.id, {
+            text: "Blocked by risk checks",
           });
-          // Follow-up: notify on confirmation or failure
-          notifyTxStatus(chatId, txid, { kind: "Buy" }).catch(() => {});
-        } catch (e) {
-          if (String(e?.message || "").includes("swap_timeout")) {
-            await bot.sendMessage(
-              chatId,
-              "⏱️ The buy is taking longer than expected due to network congestion. It may still complete. Check /positions or /lasttx in a moment."
-            );
-            swapPromise
-              .then((res) => {
-                const txid =
-                  res?.txid || (Array.isArray(res?.txids) ? res.txids[0] : null);
-                if (!txid)
-                  return bot.sendMessage(
-                    chatId,
-                    "⚠️ Swap finished but no transaction id was returned."
-                  );
-                const solscan = `https://solscan.io/tx/${txid}`;
-                const symbol = res?.output?.symbol || "TOKEN";
-                const tokOut =
-                  typeof res?.output?.tokensOut === "number"
-                    ? res.output.tokensOut.toFixed(4)
-                    : "?";
-                const impact =
-                  res?.route?.priceImpactPct != null
-                    ? `${res.route.priceImpactPct}%`
-                    : "?";
-                // Record buy trade log with racing telemetry (delayed follow-up)
-                addTradeLog(chatId, {
-                  kind: "buy",
-                  mint,
-                  sol: Number(amountSol),
-                  tokens: Number(res?.output?.tokensOut ?? NaN),
-                  route: res?.route?.labels,
-                  priceImpactPct: res?.route?.priceImpactPct ?? null,
-                  slippageBps: res?.slippageBps,
-                  priorityFeeLamports: res?.priorityFeeLamports,
-                  via: res?.via,
-                  latencyMs: res?.latencyMs,
-                  txid,
-                  lastSendRaceWinner: res?.lastSendRaceWinner ?? null,
-                  lastSendRaceAttempts: res?.lastSendRaceAttempts ?? 0,
-                  lastSendRaceLatencyMs: res?.lastSendRaceLatencyMs ?? null,
-                });
-                // Notify user completed
-                notifyTxStatus(chatId, txid, { kind: "Buy" }).catch(() => {});
+          await bot.sendMessage(
+            chatId,
+            `🚫 Trade blocked: ${risk.reasons?.join("; ")}`
+          );
+          return;
+        }
+      } catch {}
+      const swapPromise = performSwap({
+        inputMint: "So11111111111111111111111111111111111111112",
+        outputMint: mint,
+        amountSol,
+        chatId,
+      });
+      try {
+        const TIMEOUT_MS = Number(process.env.SWAP_TIMEOUT_MS || 18000);
+        const swapRes = await promiseWithTimeout(
+          swapPromise,
+          TIMEOUT_MS,
+          "swap_timeout"
+        );
+        const txid = swapRes?.txid;
+        const solscan = `https://solscan.io/tx/${txid}`;
+        const tokOut =
+          typeof swapRes?.output?.tokensOut === "number"
+            ? swapRes.output.tokensOut.toFixed(4)
+            : "?";
+        const impact =
+          swapRes?.route?.priceImpactPct != null
+            ? `${swapRes.route.priceImpactPct}%`
+            : "?";
+        const symbol = swapRes?.output?.symbol || "TOKEN";
+        await bot.sendMessage(
+          chatId,
+          `✅ Buy sent\n• Token: ${symbol} (${mint})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${
+            swapRes?.route?.labels || "route"
+          }\n• Price impact: ${impact}\n• Slippage: ${
+            swapRes?.slippageBps
+          } bps\n• Priority fee: ${swapRes?.priorityFeeLamports}\n• Via: ${
+            swapRes?.via
+          }\n• Latency: ${swapRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "Re-Buy",
+                    callback_data: `AUTO_BUY_${mint}_${amountSol}`,
+                  },
+                  {
+                    text: "Re-Quote",
+                    callback_data: `AUTO_QUOTE_${mint}_${amountSol}`,
+                  },
+                ],
+                [
+                  {
+                    text: "Re-Buy (edit amount)",
+                    callback_data: `REBUY_${mint}`,
+                  },
+                  {
+                    text: "Re-Quote (edit amount)",
+                    callback_data: `REQUOTE_${mint}`,
+                  },
+                ],
+              ],
+            },
+          }
+        );
+        // Record buy trade log with racing telemetry
+        addTradeLog(chatId, {
+          kind: "buy",
+          mint,
+          sol: Number(amountSol),
+          tokens: Number(swapRes?.output?.tokensOut ?? NaN),
+          route: swapRes?.route?.labels,
+          priceImpactPct: swapRes?.route?.priceImpactPct ?? null,
+          slippageBps: swapRes?.slippageBps,
+          priorityFeeLamports: swapRes?.priorityFeeLamports,
+          via: swapRes?.via,
+          latencyMs: swapRes?.latencyMs,
+          txid,
+          lastSendRaceWinner: swapRes?.lastSendRaceWinner ?? null,
+          lastSendRaceAttempts: swapRes?.lastSendRaceAttempts ?? 0,
+          lastSendRaceLatencyMs: swapRes?.lastSendRaceLatencyMs ?? null,
+        });
+        // Follow-up: notify on confirmation or failure
+        notifyTxStatus(chatId, txid, { kind: "Buy" }).catch(() => {});
+      } catch (e) {
+        if (String(e?.message || "").includes("swap_timeout")) {
+          await bot.sendMessage(
+            chatId,
+            "⏱️ The buy is taking longer than expected due to network congestion. It may still complete. Check /positions or /lasttx in a moment."
+          );
+          swapPromise
+            .then((res) => {
+              const txid =
+                res?.txid || (Array.isArray(res?.txids) ? res.txids[0] : null);
+              if (!txid)
                 return bot.sendMessage(
                   chatId,
-                  `✅ Buy completed\n• Token: ${symbol} (${mint})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${
-                    res?.route?.labels || "route"
-                  }\n• Price impact: ${impact}\n• Slippage: ${
-                    res?.slippageBps
-                  } bps\n• Priority fee: ${
-                    res?.priorityFeeLamports
-                  }\n• Via: ${res?.via}\n• Latency: ${
-                    res?.latencyMs
-                  } ms\n• Tx: ${txid}\n🔗 ${solscan}`
+                  "⚠️ Swap finished but no transaction id was returned."
                 );
-              })
-              .catch((err) =>
-                bot.sendMessage(
-                  chatId,
-                  `❌ Buy failed after timeout: ${err?.message || err}`
-                )
-              );
-
-            const FINAL_TIMEOUT_MS = Number(
-              process.env.SWAP_FINAL_TIMEOUT_MS || 120000
-            );
-            promiseWithTimeout(
-              swapPromise,
-              FINAL_TIMEOUT_MS,
-              "swap_final_timeout"
-            ).catch((err2) => {
-              if (String(err2?.message || "").includes("swap_final_timeout")) {
-                bot.sendMessage(
-                  chatId,
-                  "⌛ Still no confirmation after 120s. The transaction may still land. Check /positions or /lasttx shortly. If you see a txid above, you can also track it on Solscan."
-                );
-              }
-            });
-          } else {
-            await bot.sendMessage(
-              chatId,
-              `❌ Buy failed: ${e?.message || e}`
-            );
-            // Record failed buy attempt with reason for telemetry
-            try {
-              const failMsg = (e?.message || String(e)).slice(0, 300);
+              const solscan = `https://solscan.io/tx/${txid}`;
+              const symbol = res?.output?.symbol || "TOKEN";
+              const tokOut =
+                typeof res?.output?.tokensOut === "number"
+                  ? res.output.tokensOut.toFixed(4)
+                  : "?";
+              const impact =
+                res?.route?.priceImpactPct != null
+                  ? `${res.route.priceImpactPct}%`
+                  : "?";
+              // Record buy trade log with racing telemetry (delayed follow-up)
               addTradeLog(chatId, {
-                kind: "status",
-                statusOf: "buy",
+                kind: "buy",
                 mint,
                 sol: Number(amountSol),
-                status: "failed",
-                failReason: failMsg,
+                tokens: Number(res?.output?.tokensOut ?? NaN),
+                route: res?.route?.labels,
+                priceImpactPct: res?.route?.priceImpactPct ?? null,
+                slippageBps: res?.slippageBps,
+                priorityFeeLamports: res?.priorityFeeLamports,
+                via: res?.via,
+                latencyMs: res?.latencyMs,
+                txid,
+                lastSendRaceWinner: res?.lastSendRaceWinner ?? null,
+                lastSendRaceAttempts: res?.lastSendRaceAttempts ?? 0,
+                lastSendRaceLatencyMs: res?.lastSendRaceLatencyMs ?? null,
               });
-            } catch {}
-          }
+              // Notify user completed
+              notifyTxStatus(chatId, txid, { kind: "Buy" }).catch(() => {});
+              return bot.sendMessage(
+                chatId,
+                `✅ Buy completed\n• Token: ${symbol} (${mint})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${
+                  res?.route?.labels || "route"
+                }\n• Price impact: ${impact}\n• Slippage: ${
+                  res?.slippageBps
+                } bps\n• Priority fee: ${res?.priorityFeeLamports}\n• Via: ${
+                  res?.via
+                }\n• Latency: ${
+                  res?.latencyMs
+                } ms\n• Tx: ${txid}\n🔗 ${solscan}`
+              );
+            })
+            .catch((err) =>
+              bot.sendMessage(
+                chatId,
+                `❌ Buy failed after timeout: ${err?.message || err}`
+              )
+            );
+
+          const FINAL_TIMEOUT_MS = Number(
+            process.env.SWAP_FINAL_TIMEOUT_MS || 120000
+          );
+          promiseWithTimeout(
+            swapPromise,
+            FINAL_TIMEOUT_MS,
+            "swap_final_timeout"
+          ).catch((err2) => {
+            if (String(err2?.message || "").includes("swap_final_timeout")) {
+              bot.sendMessage(
+                chatId,
+                "⌛ Still no confirmation after 120s. The transaction may still land. Check /positions or /lasttx shortly. If you see a txid above, you can also track it on Solscan."
+              );
+            }
+          });
+        } else {
+          await bot.sendMessage(chatId, `❌ Buy failed: ${e?.message || e}`);
+          // Record failed buy attempt with reason for telemetry
+          try {
+            const failMsg = (e?.message || String(e)).slice(0, 300);
+            addTradeLog(chatId, {
+              kind: "status",
+              statusOf: "buy",
+              mint,
+              sol: Number(amountSol),
+              status: "failed",
+              failReason: failMsg,
+            });
+          } catch {}
+        }
         return;
       }
 
@@ -1080,7 +1270,20 @@ export async function startTelegramBot() {
         const slippageBps = s.snipeSlippage;
         const retryCount = s.snipeRetryCount;
         try {
-          addTradeLog(chatId, { kind: 'telemetry', stage: 'auto_snipe_trigger', source: 'ui:telegram', signalType: 'manual_auto_snipe', mint, params: { amountSol, pollInterval, slippageBps, retryCount, useJitoBundle } });
+          addTradeLog(chatId, {
+            kind: "telemetry",
+            stage: "auto_snipe_trigger",
+            source: "ui:telegram",
+            signalType: "manual_auto_snipe",
+            mint,
+            params: {
+              amountSol,
+              pollInterval,
+              slippageBps,
+              retryCount,
+              useJitoBundle,
+            },
+          });
         } catch {}
         startLiquidityWatch(chatId, {
           mint,
@@ -1090,8 +1293,8 @@ export async function startTelegramBot() {
           pollInterval,
           slippageBps,
           retryCount,
-          source: 'ui:telegram',
-          signalType: 'manual_auto_snipe',
+          source: "ui:telegram",
+          signalType: "manual_auto_snipe",
           onEvent: (m) => bot.sendMessage(chatId, m),
         });
         await bot.sendMessage(
@@ -1108,20 +1311,10 @@ export async function startTelegramBot() {
         return;
       }
 
-      // Settings submenu handling via callback
-      if (data === "SETTINGS") {
-        try { await bot.answerCallbackQuery(query.id, { text: "Settings" }); } catch {}
-        try {
-          const markup = buildTurboSolSettingsMenu(chatId).reply_markup;
-          await bot.sendMessage(chatId, "⚙️ TurboSol Settings", { reply_markup: markup });
-        } catch (e) {
-          try { await bot.sendMessage(chatId, "⚙️ TurboSol Settings"); } catch {}
-        }
-        return;
-      }
-
       if (data === "RPC_SETTINGS" || data === "RPC_CONFIG") {
-        try { await bot.answerCallbackQuery(query.id, { text: "RPC Settings" }); } catch {}
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "RPC Settings" });
+        } catch {}
         try {
           await bot.editMessageText("🌐 RPC Settings", {
             chat_id: chatId,
@@ -1138,7 +1331,9 @@ export async function startTelegramBot() {
 
       // Fee Settings navigation
       if (data === "FEE_SETTINGS") {
-        try { await bot.answerCallbackQuery(query.id, { text: "Fee Settings" }); } catch {}
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Fee Settings" });
+        } catch {}
         try {
           await bot.editMessageText("💰 Fee Settings", {
             chat_id: chatId,
@@ -1155,7 +1350,10 @@ export async function startTelegramBot() {
 
       // Fee Settings actions
       if (data === "SET_PRIORITY_FEE") {
-        setPendingInput(chatId, { type: "SET_PRIORITY_FEE", data: { messageId } });
+        setPendingInput(chatId, {
+          type: "SET_PRIORITY_FEE",
+          data: { messageId },
+        });
         await bot.sendMessage(
           chatId,
           "Send global priority fee in lamports (e.g., 100000) or 0 for auto"
@@ -1166,7 +1364,9 @@ export async function startTelegramBot() {
       if (data === "RESET_DYNAMIC_FEE") {
         setDynamicPriorityFeeLamports(null);
         try {
-          await bot.answerCallbackQuery(query.id, { text: "Tip override cleared" });
+          await bot.answerCallbackQuery(query.id, {
+            text: "Tip override cleared",
+          });
         } catch {}
         await bot.editMessageReplyMarkup(
           buildFeeSettingsMenu(chatId).reply_markup,
@@ -1239,7 +1439,9 @@ export async function startTelegramBot() {
         const cur = (getRelayVendor?.() || "auto").toLowerCase();
         const idx = allowed.indexOf(cur);
         const next = allowed[(idx + 1) % allowed.length];
-        try { setRelayVendor(next); } catch {}
+        try {
+          setRelayVendor(next);
+        } catch {}
         await bot.editMessageReplyMarkup(
           buildRpcSettingsMenu(chatId).reply_markup,
           {
@@ -1247,7 +1449,9 @@ export async function startTelegramBot() {
             message_id: messageId,
           }
         );
-        try { await bot.answerCallbackQuery(query.id, { text: `Vendor: ${next}` }); } catch {}
+        try {
+          await bot.answerCallbackQuery(query.id, { text: `Vendor: ${next}` });
+        } catch {}
         return;
       }
 
@@ -1270,7 +1474,10 @@ export async function startTelegramBot() {
       }
 
       if (data === "SET_RELAY_ENDPOINT_URL") {
-        setPendingInput(chatId, { type: "SET_RELAY_ENDPOINT_URL", data: { messageId } });
+        setPendingInput(chatId, {
+          type: "SET_RELAY_ENDPOINT_URL",
+          data: { messageId },
+        });
         await bot.sendMessage(
           chatId,
           "Send the private relay endpoint URL (e.g., https://api.blxr.com or https://relay.flashbots.net)"
@@ -1279,7 +1486,10 @@ export async function startTelegramBot() {
       }
 
       if (data === "SET_RELAY_API_KEY") {
-        setPendingInput(chatId, { type: "SET_RELAY_API_KEY", data: { messageId } });
+        setPendingInput(chatId, {
+          type: "SET_RELAY_API_KEY",
+          data: { messageId },
+        });
         await bot.sendMessage(
           chatId,
           "Send the API key for the private relay (stored in-memory only, not persisted to disk)"
@@ -1288,7 +1498,9 @@ export async function startTelegramBot() {
       }
 
       if (data === "TRADING_TOOLS") {
-        try { await bot.answerCallbackQuery(query.id, { text: "Trading Tools" }); } catch {}
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Trading Tools" });
+        } catch {}
         try {
           await bot.editMessageText("🛠 Trading Tools", {
             chat_id: chatId,
@@ -1303,24 +1515,10 @@ export async function startTelegramBot() {
         return;
       }
 
-      if (data === "AUTOMATION") {
-        try { await bot.answerCallbackQuery(query.id, { text: "Automation" }); } catch {}
-        try {
-          await bot.editMessageText("🤖 Automation", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: buildAutomationMenu(chatId).reply_markup,
-          });
-        } catch (e) {
-          await bot.sendMessage(chatId, "🤖 Automation", {
-            reply_markup: buildAutomationMenu(chatId).reply_markup,
-          });
-        }
-        return;
-      }
-
       if (data === "DELTA_SETTINGS") {
-        try { await bot.answerCallbackQuery(query.id, { text: "Delta Settings" }); } catch {}
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Delta Settings" });
+        } catch {}
         try {
           await bot.editMessageText("📊 Delta Settings", {
             chat_id: chatId,
@@ -1337,10 +1535,17 @@ export async function startTelegramBot() {
 
       if (data.startsWith("REBUY_")) {
         const mint = data.slice("REBUY_".length);
-        try { await bot.answerCallbackQuery(query.id, { text: "Re-Buy" }); } catch {}
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Re-Buy" });
+        } catch {}
         const st = getUserState(chatId);
-        const last = Number(st?.lastAmounts?.[mint] || st?.defaultBuySol || 0.05);
-        setPendingInput(chatId, { type: "QUICK_BUY_AMOUNT", tokenAddress: mint });
+        const last = Number(
+          st?.lastAmounts?.[mint] || st?.defaultBuySol || 0.05
+        );
+        setPendingInput(chatId, {
+          type: "QUICK_BUY_AMOUNT",
+          tokenAddress: mint,
+        });
         await bot.sendMessage(
           chatId,
           `💰 Quick Buy - ${mint}\n\nEnter amount in SOL (last: ${last} SOL):`
@@ -1350,9 +1555,13 @@ export async function startTelegramBot() {
 
       if (data.startsWith("REQUOTE_")) {
         const mint = data.slice("REQUOTE_".length);
-        try { await bot.answerCallbackQuery(query.id, { text: "Re-Quote" }); } catch {}
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Re-Quote" });
+        } catch {}
         const st = getUserState(chatId);
-        const last = Number(st?.lastAmounts?.[mint] || st?.defaultBuySol || 0.05);
+        const last = Number(
+          st?.lastAmounts?.[mint] || st?.defaultBuySol || 0.05
+        );
         setPendingInput(chatId, { type: "QUOTE_AMOUNT", tokenAddress: mint });
         // Enrich with token meta for header
         let tokenNameSym = mint;
@@ -1360,7 +1569,10 @@ export async function startTelegramBot() {
           const meta = await getTokenMeta(mint);
           const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
           const name = meta?.name ? String(meta.name).slice(0, 20) : null;
-          if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
+          if (sym || name)
+            tokenNameSym = `${name || ""}${name && sym ? " " : ""}${
+              sym ? `(${sym})` : ""
+            }`.trim();
         } catch {}
         await bot.sendMessage(
           chatId,
@@ -1370,7 +1582,9 @@ export async function startTelegramBot() {
       }
 
       if (data === "MAIN_MENU") {
-        try { await bot.answerCallbackQuery(query.id, { text: "Main Menu" }); } catch {}
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Main Menu" });
+        } catch {}
         try {
           await bot.editMessageText("🏠 Main Menu", {
             chat_id: chatId,
@@ -1386,7 +1600,9 @@ export async function startTelegramBot() {
       }
 
       if (data === "SNIPE_DEFAULTS") {
-        try { await bot.answerCallbackQuery(query.id, { text: "Snipe Defaults" }); } catch {}
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Snipe Defaults" });
+        } catch {}
         try {
           await bot.editMessageText("🎯 Snipe Defaults", {
             chat_id: chatId,
@@ -1411,7 +1627,9 @@ export async function startTelegramBot() {
           });
         } catch {}
         try {
-          try { await bot.answerCallbackQuery(query.id, { text: "Wallets" }); } catch {}
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Wallets" });
+          } catch {}
           console.log(`[DEBUG] Building wallets menu for chatId: ${chatId}`);
           const menu = await buildWalletsMenu(chatId);
           console.log(
@@ -1751,20 +1969,39 @@ export async function startTelegramBot() {
           updateUserSetting(chatId, "preLPWatchEnabled", next);
           if (next) {
             await startPreLPWatch(chatId, {
-              onEvent: (ev) => { try { bot.sendMessage(chatId, typeof ev === 'string' ? ev : ev?.type || 'prelp'); } catch {} },
-              onSnipeEvent: (mint, m) => { try { bot.sendMessage(chatId, `[PreLP ${mint}] ${m}`); } catch {} },
+              onEvent: (ev) => {
+                try {
+                  bot.sendMessage(
+                    chatId,
+                    typeof ev === "string" ? ev : ev?.type || "prelp"
+                  );
+                } catch {}
+              },
+              onSnipeEvent: (mint, m) => {
+                try {
+                  bot.sendMessage(chatId, `[PreLP ${mint}] ${m}`);
+                } catch {}
+              },
               autoSnipeOnPreLP: true,
             });
           } else {
-            try { stopPreLPWatch(chatId); } catch {}
+            try {
+              stopPreLPWatch(chatId);
+            } catch {}
           }
-          try { await bot.answerCallbackQuery(query.id, { text: next ? "Pre-LP ON" : "Pre-LP OFF" }); } catch {}
+          try {
+            await bot.answerCallbackQuery(query.id, {
+              text: next ? "Pre-LP ON" : "Pre-LP OFF",
+            });
+          } catch {}
           await bot.editMessageReplyMarkup(
             buildAutomationMenu(chatId).reply_markup,
             { chat_id: chatId, message_id: messageId }
           );
         } catch (e) {
-          try { await bot.answerCallbackQuery(query.id, { text: "Toggle failed" }); } catch {}
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
+          } catch {}
         }
         return;
       }
@@ -1775,13 +2012,19 @@ export async function startTelegramBot() {
           const cur = !!getUserState(chatId).liqDeltaEnabled;
           const next = !cur;
           updateUserSetting(chatId, "liqDeltaEnabled", next);
-          try { await bot.answerCallbackQuery(query.id, { text: next ? "Delta ON" : "Delta OFF" }); } catch {}
+          try {
+            await bot.answerCallbackQuery(query.id, {
+              text: next ? "Delta ON" : "Delta OFF",
+            });
+          } catch {}
           await bot.editMessageReplyMarkup(
             buildAutomationMenu(chatId).reply_markup,
             { chat_id: chatId, message_id: messageId }
           );
         } catch (e) {
-          try { await bot.answerCallbackQuery(query.id, { text: "Toggle failed" }); } catch {}
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
+          } catch {}
         }
         return;
       }
@@ -1797,10 +2040,14 @@ export async function startTelegramBot() {
             try {
               const existing = pumpPollers.get(chatId);
               if (existing) {
-                try { existing.stop(); } catch {}
+                try {
+                  existing.stop();
+                } catch {}
                 pumpPollers.delete(chatId);
               }
-              const poller = new PumpPortalListener({ apiKey: process.env.PUMPPORTAL_API_KEY });
+              const poller = new PumpPortalListener({
+                apiKey: process.env.PUMPPORTAL_API_KEY,
+              });
               poller.on("new_launch", async (coin) => {
                 try {
                   const state = getUserState(chatId);
@@ -1809,16 +2056,29 @@ export async function startTelegramBot() {
                   if (!mint) return;
                   await bot.sendMessage(
                     chatId,
-                    `🚨 Pump.fun launch detected\n\n${coin.symbol || ""} ${coin.name ? `(${coin.name})` : ""}\nMint: ${mint}\nMC: ${coin.marketCap || 0}\nCreator: ${coin.creator || "?"}\n\nChoose an action:`,
+                    `🚨 Pump.fun launch detected\n\n${coin.symbol || ""} ${
+                      coin.name ? `(${coin.name})` : ""
+                    }\nMint: ${mint}\nMC: ${coin.marketCap || 0}\nCreator: ${
+                      coin.creator || "?"
+                    }\n\nChoose an action:`,
                     {
                       reply_markup: {
                         inline_keyboard: [
                           [
-                            { text: `Quick Buy ${defaultBuy} SOL`, callback_data: `AUTO_BUY_${mint}_${defaultBuy}` },
-                            { text: "Quote", callback_data: `AUTO_QUOTE_${mint}_${defaultBuy}` },
+                            {
+                              text: `Quick Buy ${defaultBuy} SOL`,
+                              callback_data: `AUTO_BUY_${mint}_${defaultBuy}`,
+                            },
+                            {
+                              text: "Quote",
+                              callback_data: `AUTO_QUOTE_${mint}_${defaultBuy}`,
+                            },
                           ],
                           [
-                            { text: "Buy (set amount)", callback_data: `START_BUY_${mint}` },
+                            {
+                              text: "Buy (set amount)",
+                              callback_data: `START_BUY_${mint}`,
+                            },
                           ],
                         ],
                       },
@@ -1838,7 +2098,9 @@ export async function startTelegramBot() {
             try {
               const existing = pumpPollers.get(chatId);
               if (existing) {
-                try { existing.stop(); } catch {}
+                try {
+                  existing.stop();
+                } catch {}
                 pumpPollers.delete(chatId);
               }
             } catch (e) {
@@ -1905,9 +2167,12 @@ export async function startTelegramBot() {
         ].includes(data)
       ) {
         const promptMap = {
-          SET_DELTA_PROBE: "Send probe size in SOL for delta tracking (e.g., 0.1)",
-          SET_DELTA_IMPROV: "Send minimum improvement percent to fire (e.g., 3)",
-          SET_DELTA_IMPACT: "Send maximum acceptable price impact percent (e.g., 8)",
+          SET_DELTA_PROBE:
+            "Send probe size in SOL for delta tracking (e.g., 0.1)",
+          SET_DELTA_IMPROV:
+            "Send minimum improvement percent to fire (e.g., 3)",
+          SET_DELTA_IMPACT:
+            "Send maximum acceptable price impact percent (e.g., 8)",
           SET_DELTA_AGE: "Send minimum route age in milliseconds (e.g., 1500)",
         };
         const type = data;
@@ -1956,9 +2221,14 @@ export async function startTelegramBot() {
             let tokenNameSym = outputMint;
             try {
               const meta = await getTokenMeta(outputMint);
-              const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
+              const sym = meta?.symbol
+                ? String(meta.symbol).slice(0, 12)
+                : null;
               const name = meta?.name ? String(meta.name).slice(0, 20) : null;
-              if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
+              if (sym || name)
+                tokenNameSym = `${name || ""}${name && sym ? " " : ""}${
+                  sym ? `(${sym})` : ""
+                }`.trim();
             } catch {}
             await bot.sendMessage(
               chatId,
@@ -2024,6 +2294,151 @@ export async function startTelegramBot() {
         }
       }
 
+      if (state.pendingInput?.type === "WITHDRAW_DEST") {
+        try {
+          const dest = new PublicKey(text.trim()).toBase58();
+          setPendingInput(chatId, { type: "WITHDRAW_AMOUNT", dest });
+          await bot.sendMessage(
+            chatId,
+            `Destination set: ${shortenAddress(
+              dest
+            )}\n\nEnter amount in SOL to send:`
+          );
+        } catch (e) {
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid address. Please send a valid Solana address."
+          );
+        }
+        return;
+      }
+
+      if (state.pendingInput?.type === "WITHDRAW_AMOUNT") {
+        const amt = parseFloat(text.trim());
+        if (!Number.isFinite(amt) || amt <= 0) {
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid amount. Send a positive number in SOL."
+          );
+          return;
+        }
+        const { dest } = state.pendingInput;
+        const warn = amt > 1 ? "\n\n⚠️ Large transfer detected (>1 SOL)." : "";
+        setPendingInput(chatId, { type: "WITHDRAW_CONFIRM", dest, amt });
+        await bot.sendMessage(
+          chatId,
+          `Confirm withdrawal:\n• To: ${dest}\n• Amount: ${amt} SOL${warn}\n\nType 'yes' to confirm or 'no' to cancel.`
+        );
+        return;
+      }
+
+      if (state.pendingInput?.type === "WITHDRAW_CONFIRM") {
+        const v = (text || "").trim().toLowerCase();
+        if (v !== "yes" && v !== "y") {
+          setPendingInput(chatId, null);
+          await bot.sendMessage(chatId, "❌ Withdrawal cancelled.");
+          return;
+        }
+        const { dest, amt } = state.pendingInput;
+        if (amt > 1) {
+          setPendingInput(chatId, { type: "WITHDRAW_CONFIRM2", dest, amt });
+          await bot.sendMessage(
+            chatId,
+            "⚠️ Large transfer confirmation:\nType 'confirm' to proceed or 'no' to cancel."
+          );
+          return;
+        }
+        setPendingInput(chatId, null);
+        try {
+          await bot.sendMessage(
+            chatId,
+            `⏳ Sending ${amt} SOL to ${shortenAddress(dest)}...`
+          );
+          const res = await transferSol({ chatId, to: dest, amountSol: amt });
+          const txid = res?.txid || res?.sendMeta?.txid || null;
+          if (!txid) throw new Error("send_failed");
+          const solscan = `https://solscan.io/tx/${txid}`;
+          await bot.sendMessage(
+            chatId,
+            `✅ Sent ${amt} SOL\n• To: ${dest}\n• Via: ${res?.via}\n• Tx: ${txid}\n🔗 ${solscan}`
+          );
+        } catch (e) {
+          await bot.sendMessage(
+            chatId,
+            `❌ Withdraw failed: ${e?.message || e}`
+          );
+        }
+        return;
+      }
+
+      if (state.pendingInput?.type === "WITHDRAW_CONFIRM2") {
+        const v = (text || "").trim().toLowerCase();
+        if (v !== "confirm") {
+          setPendingInput(chatId, null);
+          await bot.sendMessage(chatId, "❌ Withdrawal cancelled.");
+          return;
+        }
+        const { dest, amt } = state.pendingInput;
+        setPendingInput(chatId, null);
+        try {
+          await bot.sendMessage(
+            chatId,
+            `⏳ Sending ${amt} SOL to ${shortenAddress(dest)}...`
+          );
+          const res = await transferSol({ chatId, to: dest, amountSol: amt });
+          const txid = res?.txid || res?.sendMeta?.txid || null;
+          if (!txid) throw new Error("send_failed");
+          const solscan = `https://solscan.io/tx/${txid}`;
+          await bot.sendMessage(
+            chatId,
+            `✅ Sent ${amt} SOL\n• To: ${dest}\n• Via: ${res?.via}\n• Tx: ${txid}\n🔗 ${solscan}`
+          );
+        } catch (e) {
+          await bot.sendMessage(
+            chatId,
+            `❌ Withdraw failed: ${e?.message || e}`
+          );
+        }
+        return;
+      }
+
+      if (state.pendingInput?.type === "SUGGESTION_TEXT") {
+        const idea = String(text || "").trim();
+        if (!idea) {
+          await bot.sendMessage(
+            chatId,
+            "Please send some text for your suggestion."
+          );
+          return;
+        }
+        try {
+          const username = msg?.from?.username ? `@${msg.from.username}` : null;
+          const res = await saveSuggestion({ chatId, username, text: idea });
+          await bot.sendMessage(
+            chatId,
+            `🙏 Thanks for your suggestion! Saved via ${res?.via}.`
+          );
+          const adminId = process.env.ADMIN_TELEGRAM_CHAT_ID;
+          if (adminId) {
+            try {
+              await bot.sendMessage(
+                Number(adminId),
+                `New suggestion from ${chatId}${
+                  username ? " (" + username + ")" : ""
+                }:\n\n${idea}`
+              );
+            } catch {}
+          }
+        } catch (e) {
+          await bot.sendMessage(
+            chatId,
+            `⚠️ Could not save suggestion: ${e?.message || e}`
+          );
+        }
+        setPendingInput(chatId, null);
+        return;
+      }
+
       if (state.pendingInput?.type === "IMPORT_WALLET") {
         try {
           const pub = await importUserWallet(chatId, text.trim());
@@ -2084,14 +2499,21 @@ export async function startTelegramBot() {
       if (state.pendingInput?.type === "SET_RELAY_ENDPOINT_URL") {
         const url = (msg.text || "").trim();
         try {
-          if (!/^https?:\/\//i.test(url)) throw new Error("Must start with http(s)://");
+          if (!/^https?:\/\//i.test(url))
+            throw new Error("Must start with http(s)://");
           setPrivateRelayEndpoint(url);
-          await bot.sendMessage(chatId, `✅ Private relay endpoint set: ${url}`);
+          await bot.sendMessage(
+            chatId,
+            `✅ Private relay endpoint set: ${url}`
+          );
           await bot.sendMessage(chatId, "RPC Settings updated:", {
             reply_markup: buildRpcSettingsMenu(chatId).reply_markup,
           });
         } catch (e) {
-          await bot.sendMessage(chatId, `❌ Failed to set relay endpoint: ${e?.message || e}`);
+          await bot.sendMessage(
+            chatId,
+            `❌ Failed to set relay endpoint: ${e?.message || e}`
+          );
         }
         setPendingInput(chatId, null);
         return;
@@ -2107,7 +2529,10 @@ export async function startTelegramBot() {
             reply_markup: buildRpcSettingsMenu(chatId).reply_markup,
           });
         } catch (e) {
-          await bot.sendMessage(chatId, `❌ Failed to set relay API key: ${e?.message || e}`);
+          await bot.sendMessage(
+            chatId,
+            `❌ Failed to set relay API key: ${e?.message || e}`
+          );
         }
         setPendingInput(chatId, null);
         return;
@@ -2118,15 +2543,24 @@ export async function startTelegramBot() {
         const raw = (msg.text || "").trim();
         const val = Number(raw);
         if (!Number.isFinite(val) || val < 0) {
-          await bot.sendMessage(chatId, "❌ Invalid number. Send 0 or a positive integer lamports value.");
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid number. Send 0 or a positive integer lamports value."
+          );
           return;
         }
         setPriorityFeeLamports(val);
         setPendingInput(chatId, null);
         if (val === 0) {
-          await bot.sendMessage(chatId, "✅ Auto priority fee enabled (static tip set to 0)");
+          await bot.sendMessage(
+            chatId,
+            "✅ Auto priority fee enabled (static tip set to 0)"
+          );
         } else {
-          await bot.sendMessage(chatId, `✅ Global priority fee set to ${val} lamports`);
+          await bot.sendMessage(
+            chatId,
+            `✅ Global priority fee set to ${val} lamports`
+          );
         }
         await bot.sendMessage(chatId, "💰 Fee Settings updated:", {
           reply_markup: buildFeeSettingsMenu(chatId).reply_markup,
@@ -2153,7 +2587,10 @@ export async function startTelegramBot() {
       if (state.pendingInput?.type === "SET_DELTA_PROBE") {
         const sol = parseFloat((msg.text || "").trim());
         if (!Number.isFinite(sol) || sol <= 0) {
-          await bot.sendMessage(chatId, "❌ Invalid amount. Send a positive number in SOL.");
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid amount. Send a positive number in SOL."
+          );
           return;
         }
         updateUserSetting(chatId, "liqDeltaProbeSol", sol);
@@ -2169,12 +2606,18 @@ export async function startTelegramBot() {
       if (state.pendingInput?.type === "SET_DELTA_IMPROV") {
         const pct = parseFloat((msg.text || "").trim());
         if (!Number.isFinite(pct) || pct < 0) {
-          await bot.sendMessage(chatId, "❌ Invalid percent. Send a non-negative number.");
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid percent. Send a non-negative number."
+          );
           return;
         }
         updateUserSetting(chatId, "liqDeltaMinImprovPct", pct);
         setPendingInput(chatId, null);
-        await bot.sendMessage(chatId, `✅ Delta min improvement set to ${pct}%`);
+        await bot.sendMessage(
+          chatId,
+          `✅ Delta min improvement set to ${pct}%`
+        );
         await bot.sendMessage(chatId, "📊 Delta Settings updated:", {
           reply_markup: buildDeltaSettingsMenu(chatId).reply_markup,
         });
@@ -2185,12 +2628,18 @@ export async function startTelegramBot() {
       if (state.pendingInput?.type === "SET_DELTA_IMPACT") {
         const pct = parseFloat((msg.text || "").trim());
         if (!Number.isFinite(pct) || pct <= 0) {
-          await bot.sendMessage(chatId, "❌ Invalid percent. Send a positive number.");
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid percent. Send a positive number."
+          );
           return;
         }
         updateUserSetting(chatId, "deltaMaxPriceImpactPct", pct);
         setPendingInput(chatId, null);
-        await bot.sendMessage(chatId, `✅ Delta max price impact set to ${pct}%`);
+        await bot.sendMessage(
+          chatId,
+          `✅ Delta max price impact set to ${pct}%`
+        );
         await bot.sendMessage(chatId, "📊 Delta Settings updated:", {
           reply_markup: buildDeltaSettingsMenu(chatId).reply_markup,
         });
@@ -2202,7 +2651,10 @@ export async function startTelegramBot() {
         const raw = (msg.text || "").trim();
         const val = Number(raw);
         if (!Number.isFinite(val) || val < 0) {
-          await bot.sendMessage(chatId, "❌ Invalid number. Send 0 or a positive integer lamports value.");
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid number. Send 0 or a positive integer lamports value."
+          );
           return;
         }
         // 0 => auto (fallback to global/auto tip); store 0 so UI shows 'auto'
@@ -2212,7 +2664,10 @@ export async function startTelegramBot() {
         if (storeVal === 0) {
           await bot.sendMessage(chatId, "✅ Snipe priority fee set to auto");
         } else {
-          await bot.sendMessage(chatId, `✅ Snipe max priority fee set to ${storeVal} lamports`);
+          await bot.sendMessage(
+            chatId,
+            `✅ Snipe max priority fee set to ${storeVal} lamports`
+          );
         }
         await bot.sendMessage(chatId, "🎯 Snipe Defaults updated:", {
           reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
@@ -2224,7 +2679,10 @@ export async function startTelegramBot() {
       if (state.pendingInput?.type === "SET_DELTA_AGE") {
         const ms = parseInt((msg.text || "").trim(), 10);
         if (!Number.isFinite(ms) || ms < 0) {
-          await bot.sendMessage(chatId, "❌ Invalid number. Send a non-negative integer.");
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid number. Send a non-negative integer."
+          );
           return;
         }
         updateUserSetting(chatId, "deltaMinRouteAgeMs", ms);
@@ -2262,7 +2720,11 @@ export async function startTelegramBot() {
           const { tokenAddress } = state.pendingInput;
           const amountSol =
             parseFloat(text.trim()) || (state.defaultBuySol ?? 0.05);
-          try { const s = getUserState(chatId); s.lastAmounts = s.lastAmounts || {}; s.lastAmounts[tokenAddress] = amountSol; } catch {}
+          try {
+            const s = getUserState(chatId);
+            s.lastAmounts = s.lastAmounts || {};
+            s.lastAmounts[tokenAddress] = amountSol;
+          } catch {}
           if (amountSol <= 0) {
             await bot.sendMessage(
               chatId,
@@ -2278,7 +2740,11 @@ export async function startTelegramBot() {
             if (Number.isFinite(cap) && amountSol > remaining + 1e-9) {
               await bot.sendMessage(
                 chatId,
-                `🚫 Daily spend cap reached. Tier: ${state.tier}. Cap: ${cap} SOL. Spent today: ${spent.toFixed(4)} SOL. Remaining: ${Math.max(0, remaining).toFixed(4)} SOL.`
+                `🚫 Daily spend cap reached. Tier: ${
+                  state.tier
+                }. Cap: ${cap} SOL. Spent today: ${spent.toFixed(
+                  4
+                )} SOL. Remaining: ${Math.max(0, remaining).toFixed(4)} SOL.`
               );
               setPendingInput(chatId, null);
               return;
@@ -2656,9 +3122,9 @@ export async function startTelegramBot() {
                     sellRes?.route?.labels || "route"
                   }\n• Price impact: ${impact}\n• Slippage: ${
                     sellRes?.slippageBps
-                  } bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${
-                    sellRes?.via
-                  }\n• Latency: ${
+                  } bps\n• Priority fee: ${
+                    sellRes?.priorityFeeLamports
+                  }\n• Via: ${sellRes?.via}\n• Latency: ${
                     sellRes?.latencyMs
                   } ms\n• Tx: ${txid}\n🔗 ${solscan}`
                 );
@@ -2675,10 +3141,8 @@ export async function startTelegramBot() {
                     via: sellRes?.via,
                     latencyMs: sellRes?.latencyMs,
                     txid,
-                    lastSendRaceWinner:
-                      sellRes?.lastSendRaceWinner ?? null,
-                    lastSendRaceAttempts:
-                      sellRes?.lastSendRaceAttempts ?? 0,
+                    lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
+                    lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
                     lastSendRaceLatencyMs:
                       sellRes?.lastSendRaceLatencyMs ?? null,
                   });
@@ -2770,7 +3234,10 @@ export async function startTelegramBot() {
             const meta = await getTokenMeta(normalizedMint);
             const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
             const name = meta?.name ? String(meta.name).slice(0, 20) : null;
-            if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
+            if (sym || name)
+              tokenNameSym = `${name || ""}${name && sym ? " " : ""}${
+                sym ? `(${sym})` : ""
+              }`.trim();
           } catch {}
           await bot.sendMessage(
             chatId,
@@ -2790,7 +3257,11 @@ export async function startTelegramBot() {
           const { tokenAddress } = state.pendingInput;
           const amountSol =
             parseFloat(text.trim()) || (state.defaultBuySol ?? 0.05);
-          try { const s = getUserState(chatId); s.lastAmounts = s.lastAmounts || {}; s.lastAmounts[tokenAddress] = amountSol; } catch {}
+          try {
+            const s = getUserState(chatId);
+            s.lastAmounts = s.lastAmounts || {};
+            s.lastAmounts[tokenAddress] = amountSol;
+          } catch {}
           if (amountSol <= 0) {
             await bot.sendMessage(
               chatId,
@@ -2824,7 +3295,10 @@ export async function startTelegramBot() {
             const meta = await getTokenMeta(tokenAddress);
             const sym = meta?.symbol ? String(meta.symbol).slice(0, 12) : null;
             const name = meta?.name ? String(meta.name).slice(0, 20) : null;
-            if (sym || name) tokenNameSym = `${name || ''}${name && sym ? ' ' : ''}${sym ? `(${sym})` : ''}`.trim();
+            if (sym || name)
+              tokenNameSym = `${name || ""}${name && sym ? " " : ""}${
+                sym ? `(${sym})` : ""
+              }`.trim();
           } catch {}
           await bot.sendMessage(
             chatId,
@@ -2843,8 +3317,14 @@ export async function startTelegramBot() {
                     },
                   ],
                   [
-                    { text: "Re-Buy (edit amount)", callback_data: `REBUY_${tokenAddress}` },
-                    { text: "Re-Quote (edit amount)", callback_data: `REQUOTE_${tokenAddress}` },
+                    {
+                      text: "Re-Buy (edit amount)",
+                      callback_data: `REBUY_${tokenAddress}`,
+                    },
+                    {
+                      text: "Re-Quote (edit amount)",
+                      callback_data: `REQUOTE_${tokenAddress}`,
+                    },
                   ],
                 ],
               },

@@ -189,7 +189,10 @@ describe("sendTransactionRaced with Flashbots private relay", () => {
         axiosPost = async (url, body, opts) => {
           expect(url).toMatch(/flashbots\.mock\/v1\/solana\/submit-bundle$/);
           expect(body && Array.isArray(body.transactions)).toBe(true);
-          return { status: 200, data: { status: "ok", signature: "FLASH_SIG" } };
+          return {
+            status: 200,
+            data: { status: "ok", signature: "FLASH_SIG" },
+          };
         };
         // RPC should not be called if relay succeeds
         sendImpl = () => Promise.reject(new Error("rpc should not be used"));
@@ -222,7 +225,8 @@ describe("sendTransactionRaced with Flashbots private relay", () => {
           }));
         sendImpl = (url) =>
           new Promise((resolve, reject) => {
-            if (url.includes("rpc-b")) setTimeout(() => resolve("SIG_RPC_B"), 10);
+            if (url.includes("rpc-b"))
+              setTimeout(() => resolve("SIG_RPC_B"), 10);
             else setTimeout(() => reject(new Error("boom_a")), 15);
           });
 

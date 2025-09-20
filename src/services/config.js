@@ -3,7 +3,8 @@ dotenv.config();
 
 let staticPriorityFeeLamports = Number(process.env.PRIORITY_FEE_LAMPORTS || 0);
 let dynamicPriorityFeeLamports = null; // dynamic override by tip optimizer
-let useJitoBundle = (String(process.env.USE_JITO_BUNDLE || "true").toLowerCase() !== "false");
+let useJitoBundle =
+  String(process.env.USE_JITO_BUNDLE || "true").toLowerCase() !== "false";
 
 let watchersPaused = false;
 let watchersSlowMs = Number(process.env.WATCHERS_SLOW_MS || 600);

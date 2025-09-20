@@ -16,27 +16,6 @@ export async function buildWalletStatusHeader(chatId) {
   return `Wallet: ${info?.address || "?"}\nSOL: ${balance}\nRPC: ${rpc}`;
 }
 
-export function buildMainMenu() {
-  return {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "🎯 Snipe", callback_data: "SNIPE_DEFAULTS" },
-          { text: "📈 Positions", callback_data: "POSITIONS" },
-        ],
-        [
-          { text: "💼 Wallets", callback_data: "WALLETS_MENU" },
-          { text: "🛠 Tools", callback_data: "TRADING_TOOLS" },
-        ],
-        [
-          { text: "🆘 Support", callback_data: "SUPPORT" },
-          { text: "⚙ ", callback_data: "SETTINGS" },
-        ],
-        [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
-      ],
-    },
-  };
-}
 
 export function buildAutomationMenu(chatId) {
   const state = getUserState(chatId);
@@ -188,29 +167,6 @@ export function buildPositionsMenu(chatId) {
   return { reply_markup: { inline_keyboard: keyboard } };
 }
 
-// New: Bloom-style main menu matching the provided design
-export function buildTurboSolMainMenu() {
-  return {
-    inline_keyboard: [
-      [
-        { text: "💼 Positions", callback_data: "POSITIONS" },
-        { text: "🎯 LP Sniper", callback_data: "LP_SNIPER" },
-      ],
-      [
-        { text: "🤖 Copy Trade", callback_data: "COPY_TRADE" },
-        { text: "💸 Withdraw", callback_data: "WITHDRAW" },
-      ],
-      [
-        { text: "📝 Limit Orders", callback_data: "LIMIT_ORDERS" },
-        { text: "⚙️ Settings", callback_data: "SETTINGS" },
-      ],
-      [
-        { text: "💡 Suggestions", callback_data: "SUGGESTIONS" },
-        { text: "🔄 Refresh", callback_data: "REFRESH" },
-      ],
-    ],
-  };
-}
 
 // Updated settings submenu
 export function buildTurboSolSettingsMenu(chatId) {

@@ -3,7 +3,13 @@ import grpc from "@grpc/grpc-js";
 import protoLoader from "@grpc/proto-loader";
 import path from "node:path";
 import bs58 from "bs58";
-import { getGrpcEndpoint, simulateTransactionRaced, sendTransactionRaced, getLastSendRaceMeta, mapStrategyToMicroBatch } from "./rpc.js";
+import {
+  getGrpcEndpoint,
+  simulateTransactionRaced,
+  sendTransactionRaced,
+  getLastSendRaceMeta,
+  mapStrategyToMicroBatch,
+} from "./rpc.js";
 import { getConnection } from "./wallet.js";
 import { addTradeLog, getUserState } from "./userState.js";
 import { recordPriorityFeeFeedback } from "./fees.js";
@@ -135,7 +141,12 @@ export async function jitoHealthCheck() {
 }
 
 // Centralized: simulate -> bundle -> send (fallback), with telemetry
-export async function simulateBundleAndSend({ signedTx, chatId, useJitoBundle = false, priorityFeeMicroLamports }) {
+export async function simulateBundleAndSend({
+  signedTx,
+  chatId,
+  useJitoBundle = false,
+  priorityFeeMicroLamports,
+}) {
   const sig = bs58.encode(signedTx.signatures?.[0] || []);
   const t0 = Date.now();
   const base64 = serializeToBase64(signedTx);
@@ -187,7 +198,12 @@ export async function simulateBundleAndSend({ signedTx, chatId, useJitoBundle = 
         });
       } catch {}
       try {
-        recordPriorityFeeFeedback({ fee: priorityFeeMicroLamports ?? null, success: true, latencyMs: Date.now() - tJ, via: "jupiter+jito" });
+        recordPriorityFeeFeedback({
+          fee: priorityFeeMicroLamports ?? null,
+          success: true,
+          latencyMs: Date.now() - tJ,
+          via: "jupiter+jito",
+        });
       } catch {}
     } catch (e) {
       jitoErr = e;
@@ -201,7 +217,12 @@ export async function simulateBundleAndSend({ signedTx, chatId, useJitoBundle = 
         });
       } catch {}
       try {
-        recordPriorityFeeFeedback({ fee: priorityFeeMicroLamports ?? null, success: false, latencyMs: Date.now() - tJ, via: "jupiter+jito" });
+        recordPriorityFeeFeedback({
+          fee: priorityFeeMicroLamports ?? null,
+          success: false,
+          latencyMs: Date.now() - tJ,
+          via: "jupiter+jito",
+        });
       } catch {}
     }
   }
@@ -232,7 +253,12 @@ export async function simulateBundleAndSend({ signedTx, chatId, useJitoBundle = 
         });
       } catch {}
       try {
-        recordPriorityFeeFeedback({ fee: priorityFeeMicroLamports ?? null, success: true, latencyMs: Date.now() - tR, via });
+        recordPriorityFeeFeedback({
+          fee: priorityFeeMicroLamports ?? null,
+          success: true,
+          latencyMs: Date.now() - tR,
+          via,
+        });
       } catch {}
     } catch (e) {
       // If Jito succeeded (no jitoErr), we still return sig; otherwise throw
@@ -250,7 +276,12 @@ export async function simulateBundleAndSend({ signedTx, chatId, useJitoBundle = 
       if (!useJitoBundle || jitoErr) {
         // Both paths failed
         try {
-          recordPriorityFeeFeedback({ fee: priorityFeeMicroLamports ?? null, success: false, latencyMs: Date.now() - tR, via: "jupiter+rpc" });
+          recordPriorityFeeFeedback({
+            fee: priorityFeeMicroLamports ?? null,
+            success: false,
+            latencyMs: Date.now() - tR,
+            via: "jupiter+rpc",
+          });
         } catch {}
         throw e;
       }

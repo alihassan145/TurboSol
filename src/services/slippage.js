@@ -29,7 +29,9 @@ async function ensureSlippageCol() {
       return col;
     })();
   }
-  try { await connectingPromise; } catch {}
+  try {
+    await connectingPromise;
+  } catch {}
   return slipCol || null;
 }
 
@@ -41,7 +43,10 @@ function pushFeedback(entry) {
 function percentile(arr, p) {
   if (!arr.length) return 0;
   const sorted = [...arr].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((p / 100) * (sorted.length - 1))));
+  const idx = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.floor((p / 100) * (sorted.length - 1)))
+  );
   return sorted[idx];
 }
 
@@ -58,11 +63,21 @@ function toBpsFromImpact(priceImpactPct) {
 // priceImpactPct: observed route impact (fraction or percent; we'll normalize)
 // success: whether the send step succeeded (does not imply on-chain fill success)
 // latencyMs: optional latency of send path
-export function recordSlippageFeedback({ usedBps, priceImpactPct, success, latencyMs }) {
+export function recordSlippageFeedback({
+  usedBps,
+  priceImpactPct,
+  success,
+  latencyMs,
+}) {
   try {
     const used = Number(usedBps || 0);
     const impactBps = toBpsFromImpact(priceImpactPct);
-    const entry = { usedBps: used, impactBps, success: !!success, latencyMs: Number(latencyMs || 0) };
+    const entry = {
+      usedBps: used,
+      impactBps,
+      success: !!success,
+      latencyMs: Number(latencyMs || 0),
+    };
     pushFeedback(entry);
     // Fire-and-forget DB insert
     ensureSlippageCol()
@@ -81,7 +96,9 @@ export function getLearnedSlippageBps() {
     // Focus on successful sends to avoid bias from unrelated failures
     const ok = slipStore.filter((s) => s.success);
     const sample = ok.length ? ok : slipStore;
-    const impactBpsList = sample.map((s) => s.impactBps).filter((n) => Number.isFinite(n) && n >= 0);
+    const impactBpsList = sample
+      .map((s) => s.impactBps)
+      .filter((n) => Number.isFinite(n) && n >= 0);
     if (!impactBpsList.length) return 0;
     const p90 = percentile(impactBpsList, 90);
     const headroom = 25; // extra bps to guard against variance
@@ -89,7 +106,9 @@ export function getLearnedSlippageBps() {
     const base = Math.max(100, baseEnv); // enforce minimum of 1% for adaptive
     const cap = 800;
     return Math.min(cap, Math.max(base, p90 + headroom));
-  } catch { return 0; }
+  } catch {
+    return 0;
+  }
 }
 
 async function getLearnedSlippageBpsFromDb(limit = 300) {
@@ -97,7 +116,10 @@ async function getLearnedSlippageBpsFromDb(limit = 300) {
     const col = await ensureSlippageCol();
     if (!col) return 0;
     const docs = await col
-      .find({}, { projection: { impactBps: 1, success: 1 }, sort: { ts: -1 }, limit })
+      .find(
+        {},
+        { projection: { impactBps: 1, success: 1 }, sort: { ts: -1 }, limit }
+      )
       .toArray()
       .catch(() => []);
     if (!docs.length) return 0;
@@ -113,7 +135,9 @@ async function getLearnedSlippageBpsFromDb(limit = 300) {
     const base = Math.max(100, baseEnv);
     const cap = 800;
     return Math.min(cap, Math.max(base, p90 + headroom));
-  } catch { return 0; }
+  } catch {
+    return 0;
+  }
 }
 
 // Estimate adaptive slippage (in basis points) combining RPC latency heuristic and learned feedback.
