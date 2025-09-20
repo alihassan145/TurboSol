@@ -11,6 +11,7 @@ import { getWatchersPaused, getWatchersSlowMs } from "../config.js";
 import { addTradeLog, getUserState } from "../userState.js";
 import { startFlashLpGuard } from "./stopLossWatcher.js";
 import { alphaBus } from "../alphaDetection.js";
+import { getRpcConnection } from "../rpc.js";
 
 const activeWatchers = new Map();
 const cooldowns = new Map(); // chatId:mint -> cool-until timestamp (ms)
@@ -47,6 +48,8 @@ export function startLiquidityWatch(
   let attempts = 0;
   let intervalMs = baseInterval;
   let stopped = false;
+  // Warn only once for insufficient SOL and pause the watcher
+  let insufficientWarned = false;
 
   // Liquidity delta heuristics & guardrails (configurable via ENV)
   const envDeltaEnabled = String(process.env.LIQ_DELTA_ENABLED || "true").toLowerCase() !== "false";
@@ -96,9 +99,12 @@ export function startLiquidityWatch(
     // balance preflight
     const bal = await getWalletBalance(chatId);
     if ((bal?.solBalance || 0) < amountSol) {
-      onEvent?.(
-        `Insufficient SOL (${bal?.solBalance || 0}). Deposit to proceed.`
-      );
+      if (!insufficientWarned) {
+        onEvent?.(`Insufficient SOL (${bal?.solBalance || 0}). Deposit to proceed.`);
+        insufficientWarned = true;
+        // Pause this watcher to avoid repeated warnings
+        stopLiquidityWatch(chatId, mint, "insufficient_sol");
+      }
       return false;
     }
     // optional risk check preflight
@@ -300,6 +306,59 @@ export function startLiquidityWatch(
         chatId,
       });
       const txid = swapRes?.txid;
+
+      // Wait for confirmation before proceeding
+      let confirmedOk = false;
+      let failedConf = false;
+      try {
+        if (txid) {
+          const connection = getRpcConnection();
+          const maxWait = Number(process.env.TX_CONFIRM_MAX_WAIT_MS || 90000);
+          const pollEvery = Number(
+            process.env.TX_CONFIRM_POLL_INTERVAL_MS || 2000
+          );
+          const startT = Date.now();
+          while (Date.now() - startT < maxWait) {
+            const st = await connection
+              .getSignatureStatuses([txid])
+              .catch(() => null);
+            const s = st?.value?.[0];
+            if (s) {
+              if (s.err) {
+                failedConf = true;
+                break;
+              }
+              const status = s.confirmationStatus;
+              if (status === "finalized" || status === "confirmed") {
+                confirmedOk = true;
+                break;
+              }
+            }
+            await new Promise((r) => setTimeout(r, pollEvery));
+          }
+        }
+      } catch {}
+
+      if (!confirmedOk) {
+        // Treat as failed attempt so watcher can retry
+        try {
+          addTradeLog(chatId, {
+            kind: "status",
+            statusOf: "buy",
+            mint,
+            sol: Number(buyAmountSol),
+            status: "failed",
+            failReason: failedConf ? "tx_err" : "tx_unconfirmed_timeout",
+            attempt: attempts,
+            txid,
+          });
+        } catch {}
+        onEvent?.(
+          `⚠️ Swap tx not confirmed (${failedConf ? "failed" : "timeout"}). Retrying... Tx: ${txid}`
+        );
+        throw new Error("tx_not_confirmed");
+      }
+
       onEvent?.(`Bought ${mint}. Tx: ${txid}`);
 
       // Record buy trade log with detailed telemetry
@@ -366,14 +425,14 @@ export function startLiquidityWatch(
   onEvent?.(`Watching ${mint} every ${baseInterval}ms ...`);
 }
 
-export function stopLiquidityWatch(chatId, mint) {
+export function stopLiquidityWatch(chatId, mint, reason = "stopped") {
   if (mint) {
     const k = `${chatId}:${mint}`;
     const interval = activeWatchers.get(k);
     if (interval) clearInterval(interval);
     activeWatchers.delete(k);
     // If still active (not executed), mark as cancelled
-    markSnipeCancelled(chatId, mint, "stopped").catch(() => {});
+    markSnipeCancelled(chatId, mint, reason).catch(() => {});
     return true;
   }
   // stop all for chatId

@@ -2911,6 +2911,128 @@ export async function startTelegramBot() {
         return;
       }
 
+      if (state.pendingInput?.type === "SNIPE_LP_TOKEN") {
+        try {
+          const normalizedMint = new PublicKey(text.trim()).toBase58();
+          setPendingInput(chatId, {
+            type: "SNIPE_LP_AMOUNT",
+            tokenAddress: normalizedMint,
+          });
+          const defaultBuy = state.defaultBuySol ?? 0.05;
+          await bot.sendMessage(
+            chatId,
+            `🎯 Snipe LP - ${normalizedMint}\n\nEnter the amount in SOL to buy when liquidity is added (default: ${defaultBuy} SOL):`
+          );
+        } catch (e) {
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid token address. Please send a valid Solana token mint."
+          );
+        }
+        return;
+      }
+
+      if (state.pendingInput?.type === "SNIPE_LP_AMOUNT") {
+        try {
+          const { tokenAddress } = state.pendingInput;
+          const amountSol =
+            parseFloat((text || "").trim()) || (state.defaultBuySol ?? 0.05);
+
+          // store last amount for UX convenience
+          try {
+            const s = getUserState(chatId);
+            s.lastAmounts = s.lastAmounts || {};
+            s.lastAmounts[tokenAddress] = amountSol;
+          } catch {}
+
+          if (!Number.isFinite(amountSol) || amountSol <= 0) {
+            await bot.sendMessage(
+              chatId,
+              "❌ Invalid amount. Please enter a positive number."
+            );
+            return;
+          }
+
+          // Enforce daily spend cap
+          try {
+            const cap = getDailyCap(chatId);
+            const spent = getDailySpent(chatId);
+            const remaining = getRemainingDailyCap(chatId);
+            if (Number.isFinite(cap) && amountSol > remaining + 1e-9) {
+              await bot.sendMessage(
+                chatId,
+                `🚫 Daily spend cap reached. Tier: ${state.tier}. Cap: ${cap} SOL. Spent today: ${spent.toFixed(4)} SOL. Remaining: ${Math.max(0, remaining).toFixed(4)} SOL.`
+              );
+              setPendingInput(chatId, null);
+              return;
+            }
+          } catch {}
+
+          if (!canProceed(chatId, "SNIPE_LP_START", 1200)) {
+            await bot.sendMessage(
+              chatId,
+              "⏳ Please wait a moment before sending another request."
+            );
+            return;
+          }
+
+          if (!(await hasUserWallet(chatId))) {
+            await bot.sendMessage(
+              chatId,
+              "No wallet linked. Use /setup to create or /import <privateKeyBase58> to link your wallet."
+            );
+            return;
+          }
+
+          const s = getUserState(chatId) || {};
+          const priorityFeeLamports = s.maxSnipeGasPrice ?? getPriorityFeeLamports();
+          const useJitoBundle = s.enableJitoForSnipes ?? getUseJitoBundle();
+          const pollInterval = s.snipePollInterval;
+          const slippageBps = s.snipeSlippage;
+          const retryCount = s.snipeRetryCount;
+
+          try {
+            addTradeLog(chatId, {
+              kind: "telemetry",
+              stage: "manual_snipe_trigger",
+              source: "ui:telegram",
+              signalType: "manual_lp_add",
+              mint: tokenAddress,
+              params: {
+                amountSol,
+                pollInterval,
+                slippageBps,
+                retryCount,
+                useJitoBundle,
+              },
+            });
+          } catch {}
+
+          setPendingInput(chatId, null);
+
+          startLiquidityWatch(chatId, {
+            mint: tokenAddress,
+            amountSol,
+            priorityFeeLamports,
+            useJitoBundle,
+            pollInterval,
+            slippageBps,
+            retryCount,
+            source: "ui:telegram",
+            signalType: "manual_lp_add",
+            onEvent: (m) => bot.sendMessage(chatId, m),
+          });
+
+          await bot.sendMessage(
+            chatId,
+            `👀 Watching for LP on ${tokenAddress}. Will buy ${amountSol} SOL when detected.`
+          );
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ Failed to start snipe: ${e?.message || e}`);
+        }
+        return;
+      }
+
       if (state.pendingInput?.type === "QUICK_BUY_TOKEN") {
         try {
           const normalizedMint = new PublicKey(text.trim()).toBase58();
