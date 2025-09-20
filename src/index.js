@@ -12,6 +12,7 @@ import { initSnipeStore, loadActiveSnipes } from "./services/snipeStore.js";
 import { startLiquidityWatch } from "./services/watchers/liquidityWatcher.js";
 import { startRpcHealthLoop, getRpcConnection } from "./services/rpc.js";
 import { startPriorityFeeRefresher } from "./services/fees.js";
+import { startCopyTradeMonitor } from "./services/watchers/copyTradeMonitor.js";
 import AlphaDetection, { alphaBus } from "./services/alphaDetection.js";
 // LP lock alerts wiring
 import { lpLockEvents } from "./services/risk.js";
@@ -32,6 +33,13 @@ async function main() {
 
   // Start dynamic priority fee refresher (learned tip model)
   startPriorityFeeRefresher({ intervalMs: Number(process.env.PRIORITY_FEE_REFRESH_MS || 1500) });
+
+  // Start Copy-Trade monitors per user
+  try {
+    for (const [chatId] of getAllUserStates()) {
+      startCopyTradeMonitor(chatId);
+    }
+  } catch {}
 
   // Start Alpha Detection layer (emits to alphaBus)
   try {

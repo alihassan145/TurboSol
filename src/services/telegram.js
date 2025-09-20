@@ -51,6 +51,8 @@ import {
   buildRpcSettingsMenu,
   buildDeltaSettingsMenu,
   buildFeeSettingsMenu,
+  buildCopyTradeMenu,
+  buildCopyTradeWalletMenu,
 } from "./menuBuilder.js";
 import {
   getUserState,
@@ -60,6 +62,11 @@ import {
   getRemainingDailyCap,
   getDailyCap,
   getDailySpent,
+  getCopyTradeState,
+  setCopyTradeEnabled,
+  addCopyTradeWallet,
+  removeCopyTradeWallet,
+  updateCopyTradeWallet,
 } from "./userState.js";
 import { readTrades } from "./tradeStore.js";
 import { PublicKey } from "@solana/web3.js";
@@ -370,6 +377,55 @@ export async function startTelegramBot() {
     // try { console.log(`[DEBUG] callback_query data=${data} chatId=${chatId}`); } catch {}
     console.log(data);
 
+    if (data === "WALLETS_MENU") {
+      console.log(
+        `[DEBUG] WALLETS_MENU callback received for chatId: ${chatId}`
+      );
+      try {
+        await bot.answerCallbackQuery(query.id, {
+          text: "Opening Wallets...",
+        });
+      } catch {}
+      try {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Wallets" });
+        } catch {}
+        console.log(`[DEBUG] Building wallets menu for chatId: ${chatId}`);
+        const menu = await buildWalletsMenu(chatId);
+        console.log(
+          `[DEBUG] Menu built successfully:`,
+          JSON.stringify(menu, null, 2)
+        );
+        await bot.editMessageText("💼 Wallets — manage your wallets", {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: menu.reply_markup,
+        });
+        console.log(`[DEBUG] Message edited successfully`);
+      } catch (e) {
+        console.log(
+          `[DEBUG] Edit failed, trying sendMessage. Error:`,
+          e.message
+        );
+        try {
+          const menu = await buildWalletsMenu(chatId);
+          await bot.sendMessage(chatId, "💼 Wallets — manage your wallets", {
+            reply_markup: menu.reply_markup,
+          });
+          console.log(`[DEBUG] New message sent successfully`);
+        } catch (fallbackError) {
+          console.log(`[DEBUG] Fallback also failed:`, fallbackError.message);
+          await bot.sendMessage(
+            chatId,
+            `Failed to open Wallets: ${(e?.message || e)
+              .toString()
+              .slice(0, 200)}`
+          );
+        }
+      }
+      return;
+    }
+
     if (data === "SETTINGS") {
       console.log("CAlling settings");
 
@@ -466,9 +522,63 @@ export async function startTelegramBot() {
     }
 
     if (data === "COPY_TRADE") {
+      try {
+        await bot.answerCallbackQuery(query.id, { text: "Copy Trade" });
+      } catch {}
+      try {
+        await bot.editMessageText("🤖 Copy Trade", {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+        });
+      } catch (e) {
+        await bot.sendMessage(chatId, "🤖 Copy Trade", {
+          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+        });
+      }
+      return;
+    }
+
+    // Copy Trade dashboard back
+    if (data === "CT_BACK") {
+      try {
+        await bot.editMessageText("🤖 Copy Trade", {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+        });
+      } catch (e) {
+        await bot.sendMessage(chatId, "🤖 Copy Trade", {
+          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+        });
+      }
+      return;
+    }
+
+    // Toggle global Copy Trade enable
+    if (data === "CT_ENABLE_TOGGLE") {
+      const ct = getCopyTradeState(chatId);
+      setCopyTradeEnabled(chatId, !ct.enabled);
+      try {
+        await bot.editMessageText("🤖 Copy Trade", {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+        });
+      } catch (e) {
+        await bot.sendMessage(chatId, "🤖 Copy Trade", {
+          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+        });
+      }
+      return;
+    }
+
+    // Start Add Wallet flow
+    if (data === "CT_ADD_WALLET") {
+      setPendingInput(chatId, { type: "CT_ADD_WALLET_ADDRESS" });
       await bot.sendMessage(
         chatId,
-        "🤖 Copy Trade is coming soon. You'll be able to follow wallets and mirror their trades automatically.",
+        "➕ Copy Trade — Add Wallet\n\nPlease send the Solana address of the wallet you want to follow.\nType 'cancel' to abort.",
         {
           reply_markup: {
             inline_keyboard: [
@@ -477,6 +587,112 @@ export async function startTelegramBot() {
           },
         }
       );
+      return;
+    }
+
+    // Remove followed wallet
+    if (data.startsWith("CT_RM_")) {
+      const address = data.slice("CT_RM_".length);
+      removeCopyTradeWallet(chatId, address);
+      try {
+        await bot.editMessageText("🤖 Copy Trade", {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+        });
+      } catch (e) {
+        await bot.sendMessage(chatId, "🤖 Copy Trade", {
+          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+        });
+      }
+      return;
+    }
+
+    // Open per-wallet config
+    if (data.startsWith("CT_W_")) {
+      const address = data.slice("CT_W_".length);
+      const title = `📍 Wallet ${shortenAddress(address)}`;
+      try {
+        await bot.editMessageText(title, {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+        });
+      } catch (e) {
+        await bot.sendMessage(chatId, title, {
+          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+        });
+      }
+      return;
+    }
+
+    // Per-wallet toggles
+    if (data.startsWith("CT_W_ENABLE_TOGGLE_")) {
+      const address = data.slice("CT_W_ENABLE_TOGGLE_".length);
+      const ct = getCopyTradeState(chatId);
+      const w = (ct.followedWallets || []).find((x) => x.address === address);
+      if (w)
+        updateCopyTradeWallet(chatId, address, {
+          enabled: !(w.enabled !== false),
+        });
+      const title = `📍 Wallet ${shortenAddress(address)}`;
+      try {
+        await bot.editMessageText(title, {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+        });
+      } catch (e) {
+        await bot.sendMessage(chatId, title, {
+          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+        });
+      }
+      return;
+    }
+
+    if (data.startsWith("CT_W_BUY_TOGGLE_")) {
+      const address = data.slice("CT_W_BUY_TOGGLE_".length);
+      const ct = getCopyTradeState(chatId);
+      const w = (ct.followedWallets || []).find((x) => x.address === address);
+      if (w)
+        updateCopyTradeWallet(chatId, address, {
+          copyBuy: !(w.copyBuy !== false),
+        });
+      const title = `📍 Wallet ${shortenAddress(address)}`;
+      try {
+        await bot.editMessageText(title, {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+        });
+      } catch (e) {
+        await bot.sendMessage(chatId, title, {
+          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+        });
+      }
+      return;
+    }
+
+    if (data.startsWith("CT_W_SELL_TOGGLE_")) {
+      const address = data.slice("CT_W_SELL_TOGGLE_".length);
+      const ct = getCopyTradeState(chatId);
+      const w = (ct.followedWallets || []).find((x) => x.address === address);
+      if (w)
+        updateCopyTradeWallet(chatId, address, {
+          copySell: !(w.copySell !== false),
+        });
+      const title = `📍 Wallet ${shortenAddress(address)}`;
+      try {
+        await bot.editMessageText(title, {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+        });
+      } catch (e) {
+        await bot.sendMessage(chatId, title, {
+          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+        });
+      }
       return;
     }
 
@@ -1617,55 +1833,6 @@ export async function startTelegramBot() {
         return;
       }
 
-      if (data === "WALLETS_MENU") {
-        console.log(
-          `[DEBUG] WALLETS_MENU callback received for chatId: ${chatId}`
-        );
-        try {
-          await bot.answerCallbackQuery(query.id, {
-            text: "Opening Wallets...",
-          });
-        } catch {}
-        try {
-          try {
-            await bot.answerCallbackQuery(query.id, { text: "Wallets" });
-          } catch {}
-          console.log(`[DEBUG] Building wallets menu for chatId: ${chatId}`);
-          const menu = await buildWalletsMenu(chatId);
-          console.log(
-            `[DEBUG] Menu built successfully:`,
-            JSON.stringify(menu, null, 2)
-          );
-          await bot.editMessageText("💼 Wallets — manage your wallets", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: menu.reply_markup,
-          });
-          console.log(`[DEBUG] Message edited successfully`);
-        } catch (e) {
-          console.log(
-            `[DEBUG] Edit failed, trying sendMessage. Error:`,
-            e.message
-          );
-          try {
-            const menu = await buildWalletsMenu(chatId);
-            await bot.sendMessage(chatId, "💼 Wallets — manage your wallets", {
-              reply_markup: menu.reply_markup,
-            });
-            console.log(`[DEBUG] New message sent successfully`);
-          } catch (fallbackError) {
-            console.log(`[DEBUG] Fallback also failed:`, fallbackError.message);
-            await bot.sendMessage(
-              chatId,
-              `Failed to open Wallets: ${(e?.message || e)
-                .toString()
-                .slice(0, 200)}`
-            );
-          }
-        }
-        return;
-      }
-
       if (data === "CREATE_WALLET") {
         try {
           const res = await createUserWallet(chatId);
@@ -2450,6 +2617,56 @@ export async function startTelegramBot() {
           await bot.sendMessage(chatId, `Import failed: ${e?.message || e}`);
         }
         setPendingInput(chatId, null);
+        return;
+      }
+
+      // Copy Trade: Add Wallet address intake
+      if (state.pendingInput?.type === "CT_ADD_WALLET_ADDRESS") {
+        const raw = (msg.text || "").trim();
+        if (!raw) {
+          await bot.sendMessage(
+            chatId,
+            "❌ Please send a Solana address or type 'cancel'."
+          );
+          return;
+        }
+        const v = raw.toLowerCase();
+        if (v === "cancel" || v === "c" || v === "no") {
+          setPendingInput(chatId, null);
+          await bot.sendMessage(chatId, "❌ Add Wallet cancelled.");
+          await bot.sendMessage(chatId, "🤖 Copy Trade", {
+            reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+          });
+          return;
+        }
+        try {
+          const normalized = new PublicKey(raw).toBase58();
+          const ct = getCopyTradeState(chatId);
+          const exists = (ct.followedWallets || []).some(
+            (w) => w.address === normalized
+          );
+          if (exists) {
+            await bot.sendMessage(
+              chatId,
+              `⚠️ Already following ${shortenAddress(normalized)}`
+            );
+          } else {
+            addCopyTradeWallet(chatId, { address: normalized });
+            await bot.sendMessage(
+              chatId,
+              `✅ Added ${shortenAddress(normalized)} to followed wallets.`
+            );
+          }
+          setPendingInput(chatId, null);
+          await bot.sendMessage(chatId, "🤖 Copy Trade", {
+            reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(
+            chatId,
+            "❌ Invalid Solana address. Please try again or type 'cancel'."
+          );
+        }
         return;
       }
 
@@ -3343,7 +3560,7 @@ export async function startTelegramBot() {
 } // close startTelegramBot
 
 // Helper: monitor a tx signature and notify user on success/failure
-async function notifyTxStatus(chatId, txid, { kind = "Trade" } = {}) {
+export async function notifyTxStatus(chatId, txid, { kind = "Trade" } = {}) {
   try {
     if (!txid) return;
     const connection = getRpcConnection();

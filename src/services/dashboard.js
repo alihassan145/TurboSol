@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getRpcStatus } from './rpc.js';
+import http from 'http';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -49,12 +50,35 @@ app.get('/active-users', (req, res) => {
   res.json({ users: [] });
 });
 
-export function startDashboardServer(port = 3000) {
+export function startDashboardServer(port) {
+  // Prefer explicit arg, then env vars, then default
+  let desired = Number(
+    port ?? process.env.DASHBOARD_PORT ?? process.env.PORT ?? 3000
+  );
+
   return new Promise((resolve) => {
-    const server = app.listen(port, () => {
-      console.log(`Dashboard server running on port ${port}`);
-      resolve(server);
-    });
+    const server = http.createServer(app);
+
+    const tryListen = (p) => {
+      server.removeAllListeners('error');
+      server.on('error', (e) => {
+        if (e && e.code === 'EADDRINUSE') {
+          const next = p + 1;
+          console.warn(`Port ${p} in use, attempting ${next}...`);
+          // Retry same server on next port
+          setTimeout(() => tryListen(next), 50);
+        } else {
+          throw e;
+        }
+      });
+
+      server.listen(p, () => {
+        console.log(`Dashboard server running on port ${p}`);
+        resolve(server);
+      });
+    };
+
+    tryListen(desired);
   });
 }
 

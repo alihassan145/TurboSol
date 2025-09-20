@@ -2,6 +2,7 @@ import { getWalletInfo } from "./walletInfo.js";
 import { getRpcStatus } from "./rpcMonitor.js";
 import { getUserState } from "./userState.js";
 import { listUserWallets } from "./userWallets.js";
+import { getCopyTradeState } from "./userState.js";
 import {
   getRelayVendor,
   getPriorityFeeLamports,
@@ -258,60 +259,41 @@ export async function buildWalletsMenu(chatId) {
       wallet.publicKey.slice(0, 6) + "..." + wallet.publicKey.slice(-4);
     keyboard.push([
       {
-        text: `${activeIndicator}${wallet.name} (${shortAddress})`,
-        callback_data: `WALLET_DETAILS_${wallet.id}`,
+        text: `${activeIndicator}${wallet.name || shortAddress}`,
+        callback_data: `WALLET_${wallet.id}`,
       },
     ]);
   }
 
-  keyboard.push([{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }]);
+  keyboard.push([{ text: "🔙 Back to Settings", callback_data: "SETTINGS" }]);
 
-  return {
-    reply_markup: {
-      inline_keyboard: keyboard,
-    },
-  };
+  return { reply_markup: { inline_keyboard: keyboard } };
 }
 
-// New: Individual wallet details menu
 export async function buildWalletDetailsMenu(chatId, walletId) {
   const wallets = await listUserWallets(chatId);
   const wallet = wallets.find((w) => w.id === walletId);
-
   if (!wallet) {
     return {
       reply_markup: {
-        inline_keyboard: [
-          [{ text: "🔙 Back to Wallets", callback_data: "WALLETS_MENU" }],
-        ],
+        inline_keyboard: [[{ text: "🔙 Back", callback_data: "WALLETS_MENU" }]],
       },
     };
   }
 
-  const keyboard = [];
-
-  if (!wallet.active) {
-    keyboard.push([
-      { text: "✅ Set as Active", callback_data: `SET_ACTIVE_${walletId}` },
-    ]);
-  }
-
-  keyboard.push([
-    { text: "✏️ Rename", callback_data: `RENAME_WALLET_${walletId}` },
-    { text: "📋 Copy Address", callback_data: `COPY_ADDRESS_${walletId}` },
-  ]);
-
-  keyboard.push([
-    { text: "🗑 Delete", callback_data: `DELETE_WALLET_${walletId}` },
-  ]);
-
-  keyboard.push([
-    { text: "🔙 Back to Wallets", callback_data: "WALLETS_MENU" },
-  ]);
-
   return {
     reply_markup: {
-      inline_keyboard: keyboard,
+      inline_keyboard: [
+        [
+          {
+            text: wallet.active ? "✅ Active" : "⚪ Set Active",
+            callback_data: `SET_ACTIVE_${wallet.id}`,
+          },
+          { text: "✏️ Rename", callback_data: `RENAME_${wallet.id}` },
+        ],
+        [{ text: "❌ Delete", callback_data: `DELETE_${wallet.id}` }],
+        [{ text: "🔙 Back", callback_data: "WALLETS_MENU" }],
+      ],
     },
   };
 }
@@ -321,141 +303,135 @@ export function buildSupportMenu() {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: "📚 Guides & Docs", callback_data: "GUIDES_DOCS" },
-          { text: "💬 Discord Support", callback_data: "DISCORD_SUPPORT" },
+          { text: "📨 Contact Support", callback_data: "CONTACT_SUPPORT" },
         ],
-        [
-          { text: "💡 Send Feedback", callback_data: "SEND_FEEDBACK" },
-          { text: "🆘 Help", callback_data: "HELP" },
-        ],
-        [{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }],
+        [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
       ],
     },
   };
 }
 
-// New: Build Snipe Defaults menu
 export function buildSnipeDefaultsMenu(chatId) {
   const state = getUserState(chatId);
-  const autoSnipeText = state.autoSnipeOnPaste
-    ? "Auto-Snipe on Paste: ON"
-    : "Auto-Snipe on Paste: OFF";
-  const jitoText = state.enableJitoForSnipes
-    ? "Jito for Snipes: ON"
-    : "Jito for Snipes: OFF";
+  const fee = state.maxSnipeGasPrice ?? 0;
+  const defaultBuy = state.defaultBuySol ?? 0.05;
   return {
     reply_markup: {
       inline_keyboard: [
         [
+          { text: `⛽ Max Priority Fee: ${fee || "Auto"}` , callback_data: "SET_SNIPE_FEE" },
+        ],
+        [
           {
-            text: `Default Buy: ${state.defaultBuySol} SOL`,
+            text: `💵 Default Quick Buy: ${defaultBuy} SOL`,
             callback_data: "SET_DEFAULT_BUY",
           },
-          {
-            text: `Default Snipe: ${state.defaultSnipeSol} SOL`,
-            callback_data: "SET_DEFAULT_SNIPE",
-          },
         ],
-        [
-          {
-            text: `Snipe Slippage: ${state.snipeSlippage} bps`,
-            callback_data: "SET_SNIPE_SLIPPAGE",
-          },
-          {
-            text: `Max Priority Fee: ${state.maxSnipeGasPrice || "auto"}`,
-            callback_data: "SET_SNIPE_FEE",
-          },
-        ],
-        [
-          { text: autoSnipeText, callback_data: "TOGGLE_AUTO_SNIPE_PASTE" },
-          { text: jitoText, callback_data: "TOGGLE_SNIPE_JITO" },
-        ],
-        [
-          {
-            text: `Poll Interval: ${state.snipePollInterval}ms`,
-            callback_data: "SET_SNIPE_INTERVAL",
-          },
-          {
-            text: `Retry Count: ${state.snipeRetryCount}`,
-            callback_data: "SET_SNIPE_RETRY",
-          },
-        ],
-        [{ text: "🔙 Back to Settings", callback_data: "SETTINGS" }],
+        [{ text: "🔙 Back", callback_data: "SETTINGS" }],
       ],
     },
   };
 }
 
 export function buildRpcSettingsMenu(chatId) {
-  const s = getUserState(chatId);
-  const relayOn = s.enablePrivateRelay ? "ON" : "OFF";
-  const strategy = (s.rpcStrategy || "balanced").toLowerCase();
-  const vendor = (getRelayVendor?.() || "auto").toLowerCase();
+  const state = getUserState(chatId);
+  const endpoints = state.rpcEndpoints || [];
+  const current = state.currentRpcIndex ?? 0;
+  const tip = state.priorityFeeLamports ?? "Auto";
+  const vendor = state.relayVendor || getRelayVendor();
+  const dyn = getDynamicPriorityFeeLamports();
   return {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: "🔁 Rotate RPC", callback_data: "ROTATE_RPC" },
-          { text: "➕ Add RPC", callback_data: "ADD_RPC" },
+          { text: `Current RPC: #${current + 1}` , callback_data: "RPC_NEXT" },
+          { text: "🔁 Rotate", callback_data: "RPC_ROTATE" },
         ],
         [
-          { text: "🔌 Set gRPC", callback_data: "SET_GRPC" },
-          { text: "📋 List Endpoints", callback_data: "LIST_RPCS" },
+          { text: `⛽ Global Priority Fee: ${tip}` , callback_data: "SET_PRIORITY_FEE" },
         ],
         [
-          {
-            text: `Private Relay: ${relayOn}`.trim(),
-            callback_data: "TOGGLE_RELAY",
-          },
-          {
-            text: `Strategy: ${strategy}`,
-            callback_data: "CYCLE_RPC_STRATEGY",
-          },
+          { text: `Jito Bundle: ${getUseJitoBundle() ? "ON" : "OFF"}` , callback_data: "JITO_SETTINGS" },
         ],
         [
-          {
-            text: `Relay Vendor: ${vendor}`.trim(),
-            callback_data: "CYCLE_RELAY_VENDOR",
-          },
-          { text: "🔐 Set Relay API Key", callback_data: "SET_RELAY_API_KEY" },
+          { text: `Relay: ${vendor}` , callback_data: "SET_RELAY_VENDOR" },
+          { text: `Dynamic Tip: ${dyn ? "ON" : "OFF"}` , callback_data: "TOGGLE_DYNAMIC_TIP" },
         ],
-        [
-          {
-            text: "🌐 Set Relay Endpoint",
-            callback_data: "SET_RELAY_ENDPOINT_URL",
-          },
-        ],
-        [
-          { text: "⬅️ Back", callback_data: "SETTINGS" },
-          { text: "🏠 Main", callback_data: "MAIN_MENU" },
-        ],
+        [{ text: "🔙 Back", callback_data: "SETTINGS" }],
       ],
     },
   };
 }
 
 export function buildFeeSettingsMenu(chatId) {
-  // chatId reserved for future per-chat fee scope; currently global
-  const globalFee = getPriorityFeeLamports();
-  const dynamic = getDynamicPriorityFeeLamports();
-  const feeLabel = dynamic != null ? `${globalFee} (dynamic)` : `${globalFee}`;
-  const rows = [
-    [
-      {
-        text: `Global Priority Fee: ${feeLabel}`,
-        callback_data: "SET_PRIORITY_FEE",
-      },
-    ],
-  ];
-  if (dynamic != null) {
-    rows.push([
-      { text: "Reset Tip Override", callback_data: "RESET_DYNAMIC_FEE" },
-    ]);
-  }
-  rows.push([{ text: "🔙 Back to Settings", callback_data: "SETTINGS" }]);
+  const state = getUserState(chatId);
+  const tip = state.priorityFeeLamports ?? getPriorityFeeLamports();
   return {
     reply_markup: {
-      inline_keyboard: rows,
+      inline_keyboard: [
+        [
+          { text: `⛽ Global Priority Fee: ${tip}` , callback_data: "SET_PRIORITY_FEE" },
+        ],
+        [
+          { text: `Use Jito Bundle: ${getUseJitoBundle() ? "ON" : "OFF"}` , callback_data: "JITO_SETTINGS" },
+        ],
+        [{ text: "🔙 Back", callback_data: "SETTINGS" }],
+      ],
     },
   };
+}
+
+// Copy Trade Menus
+export function buildCopyTradeMenu(chatId) {
+  const ct = getCopyTradeState(chatId);
+  const enabled = ct?.enabled ? "ON" : "OFF";
+  const wallets = Array.isArray(ct?.followedWallets) ? ct.followedWallets : [];
+  const keyboard = [];
+
+  keyboard.push([
+    { text: `📡 Copy Trade: ${enabled}`, callback_data: "CT_ENABLE_TOGGLE" },
+  ]);
+
+  keyboard.push([{ text: "➕ Add Wallet", callback_data: "CT_ADD_WALLET" }]);
+
+  // List wallets (limit to 8 for UI)
+  for (const w of wallets.slice(0, 8)) {
+    const label = (w.name && w.name.trim()) || shortenAddress(w.address);
+    const status = w.enabled === false ? "⛔" : "✅";
+    keyboard.push([
+      { text: `${status} ${label}`, callback_data: `CT_W_${w.address}` },
+      { text: "🗑", callback_data: `CT_RM_${w.address}` },
+    ]);
+  }
+
+  keyboard.push([{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }]);
+
+  return { reply_markup: { inline_keyboard: keyboard } };
+}
+
+export function buildCopyTradeWalletMenu(chatId, address) {
+  const ct = getCopyTradeState(chatId);
+  const w = (ct.followedWallets || []).find((x) => x.address === address);
+  const isEnabled = w?.enabled !== false;
+  const buyOn = w?.copyBuy !== false;
+  const sellOn = w?.copySell !== false;
+
+  const keyboard = [
+    [
+      { text: `${isEnabled ? "✅" : "⛔"} Wallet ${isEnabled ? "ON" : "OFF"}`, callback_data: `CT_W_ENABLE_TOGGLE_${address}` },
+    ],
+    [
+      { text: `🟢 Buy ${buyOn ? "ON" : "OFF"}`, callback_data: `CT_W_BUY_TOGGLE_${address}` },
+      { text: `🔴 Sell ${sellOn ? "ON" : "OFF"}`, callback_data: `CT_W_SELL_TOGGLE_${address}` },
+    ],
+    [
+      { text: "🗑 Remove", callback_data: `CT_RM_${address}` },
+    ],
+    [
+      { text: "🔙 Back", callback_data: "CT_BACK" },
+      { text: "🏠 Main", callback_data: "MAIN_MENU" },
+    ],
+  ];
+
+  return { reply_markup: { inline_keyboard: keyboard } };
 }

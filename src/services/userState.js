@@ -61,6 +61,11 @@ export function getUserState(chatId) {
       dailySpend: {}, // { YYYY-MM-DD: number }
       // For text input flows
       pendingInput: null, // e.g., { type: 'IMPORT_WALLET', data: {...} }
+      // Copy Trade state
+      copyTrade: {
+        enabled: false,
+        followedWallets: [], // [{ address, name?, enabled, copyBuy?, copySell?, mode?, amountSOL?, percent?, perTradeCapSOL?, dailyCapSOL?, slippageBps?, maxConcurrent? }]
+      },
     });
   }
   return userStates.get(chatId);
@@ -168,4 +173,53 @@ export function setPendingInput(chatId, pending) {
 
 export function getAllUserStates() {
   return userStates;
+}
+
+// Copy Trade helpers
+export function getCopyTradeState(chatId) {
+  const state = getUserState(chatId);
+  if (!state.copyTrade) {
+    state.copyTrade = { enabled: false, followedWallets: [] };
+  }
+  return state.copyTrade;
+}
+
+export function setCopyTradeEnabled(chatId, enabled) {
+  const ct = getCopyTradeState(chatId);
+  ct.enabled = !!enabled;
+}
+
+export function addCopyTradeWallet(chatId, wallet) {
+  const ct = getCopyTradeState(chatId);
+  const address = String(wallet?.address || "").trim();
+  if (!address) return;
+  const exists = (ct.followedWallets || []).some((w) => w.address === address);
+  if (exists) return;
+  const entry = {
+    address,
+    name: wallet?.name || "",
+    enabled: wallet?.enabled !== false,
+    copyBuy: wallet?.copyBuy !== false,
+    copySell: wallet?.copySell !== false,
+    mode: wallet?.mode || "fixed", // fixed | percent
+    amountSOL: Number.isFinite(Number(wallet?.amountSOL)) ? Number(wallet.amountSOL) : 0.05,
+    percent: Number.isFinite(Number(wallet?.percent)) ? Number(wallet.percent) : 10,
+    perTradeCapSOL: Number.isFinite(Number(wallet?.perTradeCapSOL)) ? Number(wallet.perTradeCapSOL) : null,
+    dailyCapSOL: Number.isFinite(Number(wallet?.dailyCapSOL)) ? Number(wallet.dailyCapSOL) : null,
+    slippageBps: Number.isFinite(Number(wallet?.slippageBps)) ? Number(wallet.slippageBps) : null,
+    maxConcurrent: Number.isFinite(Number(wallet?.maxConcurrent)) ? Number(wallet.maxConcurrent) : null,
+    addedAt: Date.now(),
+  };
+  ct.followedWallets.push(entry);
+}
+
+export function removeCopyTradeWallet(chatId, address) {
+  const ct = getCopyTradeState(chatId);
+  ct.followedWallets = (ct.followedWallets || []).filter((w) => w.address !== address);
+}
+
+export function updateCopyTradeWallet(chatId, address, patch = {}) {
+  const ct = getCopyTradeState(chatId);
+  const w = (ct.followedWallets || []).find((x) => x.address === address);
+  if (w) Object.assign(w, patch);
 }

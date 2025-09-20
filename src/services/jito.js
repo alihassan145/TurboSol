@@ -147,7 +147,14 @@ export async function simulateBundleAndSend({
   useJitoBundle = false,
   priorityFeeMicroLamports,
 }) {
-  const sig = bs58.encode(signedTx.signatures?.[0] || []);
+  // Safely derive a base58 signature string if available (telemetry only)
+  let sig = null;
+  try {
+    const sigBytes = signedTx?.signatures?.[0]?.signature;
+    if (sigBytes) {
+      sig = bs58.encode(sigBytes);
+    }
+  } catch {}
   const t0 = Date.now();
   const base64 = serializeToBase64(signedTx);
 
@@ -260,8 +267,8 @@ export async function simulateBundleAndSend({
           via,
         });
       } catch {}
+      return { txid: sigRpc, via };
     } catch (e) {
-      // If Jito succeeded (no jitoErr), we still return sig; otherwise throw
       try {
         addTradeLog(chatId, {
           kind: "telemetry",
@@ -273,28 +280,17 @@ export async function simulateBundleAndSend({
           microBatch,
         });
       } catch {}
-      if (!useJitoBundle || jitoErr) {
-        // Both paths failed
-        try {
-          recordPriorityFeeFeedback({
-            fee: priorityFeeMicroLamports ?? null,
-            success: false,
-            latencyMs: Date.now() - tR,
-            via: "jupiter+rpc",
-          });
-        } catch {}
-        throw e;
-      }
+      try {
+        recordPriorityFeeFeedback({
+          fee: priorityFeeMicroLamports ?? null,
+          success: false,
+          latencyMs: Date.now() - tR,
+          via,
+        });
+      } catch {}
+      throw e;
     }
   }
 
-  const raceMeta = getLastSendRaceMeta?.() || {};
-  return {
-    txid: sig,
-    via,
-    latencyMs: Date.now() - t0,
-    lastSendRaceWinner: raceMeta?.winner || null,
-    lastSendRaceAttempts: raceMeta?.attempts || 0,
-    lastSendRaceLatencyMs: raceMeta?.latencyMs ?? null,
-  };
+  return { txid: sig, via };
 }

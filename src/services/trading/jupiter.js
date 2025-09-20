@@ -197,14 +197,17 @@ export async function performSwap({
   chatId,
   priorityFeeLamports,
   useJitoBundle,
+  slippageBps: slippageBpsOverride,
 }) {
   if (!Number.isFinite(Number(amountSol)) || Number(amountSol) <= 0)
     throw new Error("invalid_amount");
   const connection = getRpcConnection();
   const wallet = await getUserWalletInstance(chatId);
-  const slippageBps = await getAdaptiveSlippageBps().catch(() =>
-    Number(process.env.DEFAULT_SLIPPAGE_BPS || 100)
-  );
+  const slippageBps = Number.isFinite(Number(slippageBpsOverride))
+    ? Number(slippageBpsOverride)
+    : await getAdaptiveSlippageBps().catch(() =>
+        Number(process.env.DEFAULT_SLIPPAGE_BPS || 100)
+      );
 
   const quoteRes = await getTokenQuote({
     inputMint,
