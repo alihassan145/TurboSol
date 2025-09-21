@@ -7,6 +7,7 @@ import {
   getRelayVendor,
   getPriorityFeeLamports,
   getDynamicPriorityFeeLamports,
+  getUseJitoBundle,
 } from "./config.js";
 
 export async function buildWalletStatusHeader(chatId) {

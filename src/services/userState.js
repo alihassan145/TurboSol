@@ -2,7 +2,110 @@
 import { appendTrade } from "./tradeStore.js";
 import { recordTradeEvent } from "./analytics/behaviorProfiling.js";
 import { getUserPublicKey } from "./userWallets.js";
+import { MongoClient } from "mongodb";
+
 const userStates = new Map();
+
+// Whitelist of keys we persist to DB per user (focus on automation/settings)
+const PERSISTED_KEYS = new Set([
+  // Core automation toggles
+  "autoSnipeMode",
+  "afkMode",
+  "preLPWatchEnabled",
+  "liqDeltaEnabled",
+  "pumpFunAlerts",
+  // Snipe defaults/config
+  "autoSnipeOnPaste",
+  "snipeSlippage",
+  "maxSnipeGasPrice",
+  "snipePollInterval",
+  "enableJitoForSnipes",
+  "snipeRetryCount",
+  // Risk/alerts
+  "lpUnlockAlerts",
+  // General settings
+  "degenMode",
+  "buyProtection",
+  "expertMode",
+  "privatePnl",
+  "enablePrivateRelay",
+  "rpcStrategy",
+  // Liquidity Delta per-chat overrides
+  "liqDeltaProbeSol",
+  "liqDeltaMinImprovPct",
+  "deltaMaxPriceImpactPct",
+  "deltaMinRouteAgeMs",
+  // Tier (optional)
+  "tier"
+]);
+
+// Optional: lazy Mongo connection for storing user settings
+let mongoClient;
+let settingsCol;
+let connectingPromise;
+
+async function ensureSettingsCol() {
+  if (settingsCol) return settingsCol;
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return null; // allow app to run without DB
+  if (!connectingPromise) {
+    connectingPromise = (async () => {
+      const client = new MongoClient(uri, { ignoreUndefined: true });
+      await client.connect();
+      const db = client.db(process.env.MONGODB_DB || "turbosol");
+      const col = db.collection("user_settings");
+      try {
+        await col.createIndex({ chatId: 1 }, { unique: true });
+      } catch {}
+      mongoClient = client;
+      settingsCol = col;
+      return col;
+    })();
+  }
+  try {
+    await connectingPromise;
+  } catch (e) {
+    // swallow DB init errors to avoid impacting runtime
+  }
+  return settingsCol || null;
+}
+
+async function persistUserSetting(chatId, key, value) {
+  try {
+    const col = await ensureSettingsCol();
+    if (!col) return; // DB not configured
+    const now = new Date();
+    await col.updateOne(
+      { chatId: String(chatId) },
+      {
+        $set: { [key]: value, updatedAt: now },
+        $setOnInsert: { chatId: String(chatId), createdAt: now }
+      },
+      { upsert: true }
+    );
+  } catch {
+    // ignore persistence errors
+  }
+}
+
+async function loadSettingsFor(chatId) {
+  try {
+    const col = await ensureSettingsCol();
+    if (!col) return null;
+    const doc = await col.findOne({ chatId: String(chatId) });
+    if (doc) {
+      const state = userStates.get(chatId) || getUserState(chatId);
+      for (const [k, v] of Object.entries(doc)) {
+        if (PERSISTED_KEYS.has(k) && v !== undefined) {
+          state[k] = v;
+        }
+      }
+    }
+    return doc;
+  } catch {
+    return null;
+  }
+}
 
 export function getUserState(chatId) {
   if (!userStates.has(chatId)) {
@@ -67,8 +170,11 @@ export function getUserState(chatId) {
       copyTrade: {
         enabled: false,
         followedWallets: [], // [{ address, name?, enabled, copyBuy?, copySell?, mode?, amountSOL?, percent?, perTradeCapSOL?, dailyCapSOL?, slippageBps?, maxConcurrent? }]
-      },
+      }
     });
+
+    // Lazily hydrate from DB (best-effort, non-blocking)
+    loadSettingsFor(chatId).catch(() => {});
   }
   return userStates.get(chatId);
 }
@@ -98,6 +204,10 @@ export function goBack(chatId) {
 export function updateUserSetting(chatId, key, value) {
   const state = getUserState(chatId);
   state[key] = value;
+  if (PERSISTED_KEYS.has(key)) {
+    // Best-effort persistence
+    persistUserSetting(chatId, key, value).catch(() => {});
+  }
 }
 
 export function addPosition(chatId, position) {

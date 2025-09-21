@@ -549,6 +549,218 @@ export async function startTelegramBot() {
         return;
       }
 
+      // Automation toggles moved into switch to avoid startsWith() collisions
+      case data === "AUTO_SNIPE_TOGGLE": {
+        console.log("Toggle auto snipe");
+        try {
+          const current = !!getUserState(chatId).autoSnipeMode;
+          const next = !current;
+          updateUserSetting(chatId, "autoSnipeMode", next);
+          try {
+            await bot.answerCallbackQuery(query.id, {
+              text: next ? "Auto snipe ON" : "Auto snipe OFF",
+            });
+          } catch {}
+          await bot.editMessageReplyMarkup(
+            buildAutomationMenu(chatId).reply_markup,
+            { chat_id: chatId, message_id: messageId }
+          );
+        } catch (e) {
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
+          } catch {}
+        }
+        return;
+      }
+
+      case data === "AFK_MODE_TOGGLE": {
+        try {
+          const current = !!getUserState(chatId).afkMode;
+          const next = !current;
+          updateUserSetting(chatId, "afkMode", next);
+          try {
+            await bot.answerCallbackQuery(query.id, {
+              text: next ? "AFK mode ON" : "AFK mode OFF",
+            });
+          } catch {}
+          await bot.editMessageReplyMarkup(
+            buildAutomationMenu(chatId).reply_markup,
+            { chat_id: chatId, message_id: messageId }
+          );
+        } catch (e) {
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
+          } catch {}
+        }
+        return;
+      }
+
+      case data === "PRELP_TOGGLE": {
+        try {
+          const current = !!getUserState(chatId).preLPWatchEnabled;
+          const next = !current;
+          updateUserSetting(chatId, "preLPWatchEnabled", next);
+          if (next) {
+            await startPreLPWatch(chatId, {
+              onEvent: (ev) => {
+                try {
+                  bot.sendMessage(
+                    chatId,
+                    typeof ev === "string" ? ev : ev?.type || "prelp"
+                  );
+                } catch {}
+              },
+              onSnipeEvent: (mint, m) => {
+                try {
+                  bot.sendMessage(chatId, `[PreLP ${mint}] ${m}`);
+                } catch {}
+              },
+              autoSnipeOnPreLP: true,
+            });
+          } else {
+            try {
+              stopPreLPWatch(chatId);
+            } catch {}
+          }
+          try {
+            await bot.answerCallbackQuery(query.id, {
+              text: next ? "Pre-LP ON" : "Pre-LP OFF",
+            });
+          } catch {}
+          await bot.editMessageReplyMarkup(
+            buildAutomationMenu(chatId).reply_markup,
+            { chat_id: chatId, message_id: messageId }
+          );
+        } catch (e) {
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
+          } catch {}
+        }
+        return;
+      }
+
+      case data === "DELTA_TOGGLE": {
+        try {
+          const cur = !!getUserState(chatId).liqDeltaEnabled;
+          const next = !cur;
+          updateUserSetting(chatId, "liqDeltaEnabled", next);
+          try {
+            await bot.answerCallbackQuery(query.id, {
+              text: next ? "Delta ON" : "Delta OFF",
+            });
+          } catch {}
+          await bot.editMessageReplyMarkup(
+            buildAutomationMenu(chatId).reply_markup,
+            { chat_id: chatId, message_id: messageId }
+          );
+        } catch (e) {
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
+          } catch {}
+        }
+        return;
+      }
+
+      case data === "PUMPFUN_TOGGLE": {
+        try {
+          const current = getUserState(chatId).pumpFunAlerts;
+          const next = !current;
+          updateUserSetting(chatId, "pumpFunAlerts", next);
+          if (next) {
+            // Start PumpPortal WebSocket listener for new launches (avoids HTTP 530)
+            try {
+              const existing = pumpPollers.get(chatId);
+              if (existing) {
+                try {
+                  existing.stop();
+                } catch {}
+                pumpPollers.delete(chatId);
+              }
+              const poller = new PumpPortalListener({
+                apiKey: process.env.PUMPPORTAL_API_KEY,
+              });
+              poller.on("new_launch", async (coin) => {
+                try {
+                  const state = getUserState(chatId);
+                  const defaultBuy = state.defaultBuySol ?? 0.05;
+                  const mint = coin?.mint;
+                  if (!mint) return;
+                  await bot.sendMessage(
+                    chatId,
+                    `🚨 Pump.fun launch detected\n\n${coin.symbol || ""} ${
+                      coin.name ? `(${coin.name})` : ""
+                    }\nMint: ${mint}\nMC: ${coin.marketCap || 0}\nCreator: ${
+                      coin.creator || "?"
+                    }\n\nChoose an action:`,
+                    {
+                      reply_markup: {
+                        inline_keyboard: [
+                          [
+                            {
+                              text: `Quick Buy ${defaultBuy} SOL`,
+                              callback_data: `AUTO_BUY_${mint}_${defaultBuy}`,
+                            },
+                            {
+                              text: "Quote",
+                              callback_data: `AUTO_QUOTE_${mint}_${defaultBuy}`,
+                            },
+                          ],
+                          [
+                            {
+                              text: "Buy (set amount)",
+                              callback_data: `START_BUY_${mint}`,
+                            },
+                          ],
+                        ],
+                      },
+                    }
+                  );
+                } catch (e) {
+                  console.error("Failed to send Pump.fun alert message:", e);
+                }
+              });
+              poller.start();
+              pumpPollers.set(chatId, poller);
+            } catch (e) {
+              console.error("Failed to start Pump.fun poller:", e);
+            }
+          } else {
+            // Stop listener if active
+            try {
+              const existing = pumpPollers.get(chatId);
+              if (existing) {
+                try {
+                  existing.stop();
+                } catch {}
+                pumpPollers.delete(chatId);
+              }
+            } catch (e) {
+              console.warn("Pump.fun poller stop error:", e?.message || e);
+            }
+            // Also stop any legacy log-based listener if running
+            try {
+              stopPumpFunListener(chatId);
+            } catch (e) {
+              console.warn("stopPumpFunListener error:", e?.message || e);
+            }
+          }
+          await bot.answerCallbackQuery(query.id, {
+            text: next ? "Pump.fun alerts enabled" : "Pump.fun alerts disabled",
+          });
+          await bot.editMessageReplyMarkup(
+            buildAutomationMenu(chatId).reply_markup,
+            {
+              chat_id: chatId,
+              message_id: messageId,
+            }
+          );
+        } catch (e) {
+          console.error("PUMPFUN_TOGGLE error:", e);
+          await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
+        }
+        return;
+      }
+
       case data === "REFRESH": {
         const welcome = await buildTurboSolWelcomeMessage(chatId);
         await bot.sendMessage(chatId, welcome);
@@ -1945,6 +2157,25 @@ For support, reply here and we’ll follow up.`;
         return;
       }
 
+      // Automation -> Auto Snipe Config maps to Snipe Defaults page
+      if (data === "AUTO_SNIPE_CONFIG") {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Snipe Defaults" });
+        } catch {}
+        try {
+          await bot.editMessageText("🎯 Snipe Defaults", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🎯 Snipe Defaults", {
+            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
       if (data === "CREATE_WALLET") {
         try {
           const res = await createUserWallet(chatId);
@@ -2240,174 +2471,6 @@ For support, reply here and we’ll follow up.`;
         return;
       }
 
-      // Pre-LP scanner toggle (Automation menu)
-      if (data === "PRELP_TOGGLE") {
-        try {
-          const current = !!getUserState(chatId).preLPWatchEnabled;
-          const next = !current;
-          updateUserSetting(chatId, "preLPWatchEnabled", next);
-          if (next) {
-            await startPreLPWatch(chatId, {
-              onEvent: (ev) => {
-                try {
-                  bot.sendMessage(
-                    chatId,
-                    typeof ev === "string" ? ev : ev?.type || "prelp"
-                  );
-                } catch {}
-              },
-              onSnipeEvent: (mint, m) => {
-                try {
-                  bot.sendMessage(chatId, `[PreLP ${mint}] ${m}`);
-                } catch {}
-              },
-              autoSnipeOnPreLP: true,
-            });
-          } else {
-            try {
-              stopPreLPWatch(chatId);
-            } catch {}
-          }
-          try {
-            await bot.answerCallbackQuery(query.id, {
-              text: next ? "Pre-LP ON" : "Pre-LP OFF",
-            });
-          } catch {}
-          await bot.editMessageReplyMarkup(
-            buildAutomationMenu(chatId).reply_markup,
-            { chat_id: chatId, message_id: messageId }
-          );
-        } catch (e) {
-          try {
-            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
-          } catch {}
-        }
-        return;
-      }
-
-      // Liquidity Delta heuristic toggle (Automation menu)
-      if (data === "DELTA_TOGGLE") {
-        try {
-          const cur = !!getUserState(chatId).liqDeltaEnabled;
-          const next = !cur;
-          updateUserSetting(chatId, "liqDeltaEnabled", next);
-          try {
-            await bot.answerCallbackQuery(query.id, {
-              text: next ? "Delta ON" : "Delta OFF",
-            });
-          } catch {}
-          await bot.editMessageReplyMarkup(
-            buildAutomationMenu(chatId).reply_markup,
-            { chat_id: chatId, message_id: messageId }
-          );
-        } catch (e) {
-          try {
-            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
-          } catch {}
-        }
-        return;
-      }
-
-      // Pump.fun alerts toggle
-      if (data === "PUMPFUN_TOGGLE") {
-        try {
-          const current = getUserState(chatId).pumpFunAlerts;
-          const next = !current;
-          updateUserSetting(chatId, "pumpFunAlerts", next);
-          if (next) {
-            // Start PumpPortal WebSocket listener for new launches (avoids HTTP 530)
-            try {
-              const existing = pumpPollers.get(chatId);
-              if (existing) {
-                try {
-                  existing.stop();
-                } catch {}
-                pumpPollers.delete(chatId);
-              }
-              const poller = new PumpPortalListener({
-                apiKey: process.env.PUMPPORTAL_API_KEY,
-              });
-              poller.on("new_launch", async (coin) => {
-                try {
-                  const state = getUserState(chatId);
-                  const defaultBuy = state.defaultBuySol ?? 0.05;
-                  const mint = coin?.mint;
-                  if (!mint) return;
-                  await bot.sendMessage(
-                    chatId,
-                    `🚨 Pump.fun launch detected\n\n${coin.symbol || ""} ${
-                      coin.name ? `(${coin.name})` : ""
-                    }\nMint: ${mint}\nMC: ${coin.marketCap || 0}\nCreator: ${
-                      coin.creator || "?"
-                    }\n\nChoose an action:`,
-                    {
-                      reply_markup: {
-                        inline_keyboard: [
-                          [
-                            {
-                              text: `Quick Buy ${defaultBuy} SOL`,
-                              callback_data: `AUTO_BUY_${mint}_${defaultBuy}`,
-                            },
-                            {
-                              text: "Quote",
-                              callback_data: `AUTO_QUOTE_${mint}_${defaultBuy}`,
-                            },
-                          ],
-                          [
-                            {
-                              text: "Buy (set amount)",
-                              callback_data: `START_BUY_${mint}`,
-                            },
-                          ],
-                        ],
-                      },
-                    }
-                  );
-                } catch (e) {
-                  console.error("Failed to send Pump.fun alert message:", e);
-                }
-              });
-              poller.start();
-              pumpPollers.set(chatId, poller);
-            } catch (e) {
-              console.error("Failed to start Pump.fun poller:", e);
-            }
-          } else {
-            // Stop listener if active
-            try {
-              const existing = pumpPollers.get(chatId);
-              if (existing) {
-                try {
-                  existing.stop();
-                } catch {}
-                pumpPollers.delete(chatId);
-              }
-            } catch (e) {
-              console.warn("Pump.fun poller stop error:", e?.message || e);
-            }
-            // Also stop any legacy log-based listener if running
-            try {
-              stopPumpFunListener(chatId);
-            } catch (e) {
-              console.warn("stopPumpFunListener error:", e?.message || e);
-            }
-          }
-          await bot.answerCallbackQuery(query.id, {
-            text: next ? "Pump.fun alerts enabled" : "Pump.fun alerts disabled",
-          });
-          await bot.editMessageReplyMarkup(
-            buildAutomationMenu(chatId).reply_markup,
-            {
-              chat_id: chatId,
-              message_id: messageId,
-            }
-          );
-        } catch (e) {
-          console.error("PUMPFUN_TOGGLE error:", e);
-          await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
-        }
-        return;
-      }
 
       // Snipe Defaults numeric inputs
       if (
