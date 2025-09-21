@@ -216,6 +216,12 @@ export function validateEnvAndInstallRedaction(options = {}) {
     errors,
   });
 
+  asNumberInRange("RPC_READ_MICRO_BATCH", process.env.RPC_READ_MICRO_BATCH, {
+    min: 1,
+    max: 5,
+    errors,
+  });
+
   asNumberInRange(
     "RPC_HEALTH_INTERVAL_MS",
     process.env.RPC_HEALTH_INTERVAL_MS,

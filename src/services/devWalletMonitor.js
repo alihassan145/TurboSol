@@ -1,4 +1,5 @@
 import { Connection, PublicKey } from "@solana/web3.js";
+import { getSignaturesForAddressRaced, getTransactionRaced } from "./rpc.js";
 import { EventEmitter } from "events";
 import fs from "fs";
 import path from "path";
@@ -129,9 +130,9 @@ class DevWalletMonitor extends EventEmitter {
 
   async checkWalletActivity(address) {
     try {
-      const signatures = await this.connection.getSignaturesForAddress(
+      const signatures = await getSignaturesForAddressRaced(
         new PublicKey(address),
-        { limit: 100 }
+        { options: { limit: 100 } }
       );
 
       const wallet = this.monitoredWallets.get(address);
@@ -140,8 +141,7 @@ class DevWalletMonitor extends EventEmitter {
       for (const sig of signatures) {
         if (sig.blockTime <= wallet.lastActivity) continue;
 
-        const tx = await this.connection.getTransaction(sig.signature, {
-          commitment: "confirmed",
+        const tx = await getTransactionRaced(sig.signature, {
           maxSupportedTransactionVersion: 0,
         });
 
@@ -286,54 +286,46 @@ class DevWalletMonitor extends EventEmitter {
 
   // Multi-hop correlation
   async correlateWallets(address) {
-    if (!this.isValidSolanaAddress(address)) return null;
-
-    const correlation = {
-      address,
-      fundingPaths: [],
-      sharedGasWallets: [],
-      connectedWallets: [],
-      patterns: [],
-    };
-
     try {
-      const signatures = await this.connection.getSignaturesForAddress(
+      const signatures = await getSignaturesForAddressRaced(
         new PublicKey(address),
-        { limit: 100 }
+        { options: { limit: 100 } }
       );
 
+      const relatedMints = new Map();
+      const relatedWallets = new Map();
+
       for (const sig of signatures) {
-        const tx = await this.connection.getTransaction(sig.signature, {
+        const tx = await getTransactionRaced(sig.signature, {
           maxSupportedTransactionVersion: 0,
         });
+
         if (!tx) continue;
 
-        // Analyze funding sources
-        const funding = this.analyzeFunding(tx);
-        if (funding) {
-          correlation.fundingPaths.push(funding);
+        const mint = this.extractMintFromInstructions(
+          tx.transaction.message.instructions
+        );
+        if (mint) {
+          relatedMints.set(mint, (relatedMints.get(mint) || 0) + 1);
         }
 
-        // Identify gas wallet relationships
-        const gasWallet = tx.transaction.message.accountKeys[0].toString();
-        if (
-          gasWallet !== address &&
-          !correlation.sharedGasWallets.includes(gasWallet)
-        ) {
-          correlation.sharedGasWallets.push(gasWallet);
-        }
-
-        // Look for shared transaction patterns
-        const pattern = this.identifyPattern(tx);
-        if (pattern) {
-          correlation.patterns.push(pattern);
+        // Analyze other wallets involved
+        const keys = tx.transaction.message.accountKeys;
+        for (const key of keys) {
+          const addr = key.toString();
+          if (addr !== address) {
+            relatedWallets.set(addr, (relatedWallets.get(addr) || 0) + 1);
+          }
         }
       }
 
-      return correlation;
+      return {
+        relatedMints: Array.from(relatedMints.entries()),
+        relatedWallets: Array.from(relatedWallets.entries()),
+      };
     } catch (error) {
-      console.error("❌ Correlation error:", error.message);
-      return correlation;
+      console.error(`❌ Failed to correlate ${address}:`, error.message);
+      return { relatedMints: [], relatedWallets: [] };
     }
   }
 

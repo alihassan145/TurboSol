@@ -207,7 +207,7 @@ class AlphaDetection extends EventEmitter {
       try {
         const signatures = await getSignaturesForAddressRaced(
           new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
-          { options: { limit: 100 } }
+          { options: { limit: Number(process.env.MEMPOOL_SIG_LIMIT || 30) } }
         );
 
         for (const sig of signatures) {

@@ -1,6 +1,7 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { EventEmitter } from 'events';
 import bs58 from 'bs58';
+import { getSignaturesForAddressRaced, getTransactionRaced } from './rpc.js';
 
 const RAYDIUM_AMM_PROGRAM = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
 const PUMP_FUN_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6Q';
@@ -45,17 +46,16 @@ class PreLPScanner extends EventEmitter {
   async scanMempool() {
     try {
       // Get recent signatures from network
-      const signatures = await this.connection.getSignaturesForAddress(
+      const signatures = await getSignaturesForAddressRaced(
         new PublicKey(PUMP_FUN_PROGRAM),
-        { limit: 100 }
+        { options: { limit: 100 } }
       );
 
       for (const sig of signatures) {
         if (this.mempoolCache.has(sig.signature) || this.seenPumpSigs.has(sig.signature)) continue;
         
         try {
-          const tx = await this.connection.getTransaction(sig.signature, {
-            commitment: 'confirmed',
+          const tx = await getTransactionRaced(sig.signature, {
             maxSupportedTransactionVersion: 0
           });
 

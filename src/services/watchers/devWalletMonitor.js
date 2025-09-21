@@ -1,8 +1,8 @@
-import { getUserConnectionInstance } from "../wallet.js";
 import { PublicKey } from "@solana/web3.js";
 import { getUserState, addTradeLog } from "../userState.js";
 import { hasUserWallet } from "../userWallets.js";
 import { startLiquidityWatch } from "./liquidityWatcher.js";
+import { getSignaturesForAddressRaced, getTransactionRaced } from "../rpc.js";
 
 const monitors = new Map();
 
@@ -30,7 +30,6 @@ export async function startDevWalletMonitor(
     listeners: new Set(),
   };
   monitors.set(k, entry);
-  const conn = await getUserConnectionInstance(chatId);
   // Always register provided listener
   if (!entry.listeners) entry.listeners = new Set();
   if (onTx) entry.listeners.add(onTx);
@@ -39,8 +38,8 @@ export async function startDevWalletMonitor(
   entry.interval = setInterval(async () => {
     for (const addr of entry.addrs) {
       try {
-        const sigs = await conn.getSignaturesForAddress(new PublicKey(addr), {
-          limit: 5,
+        const sigs = await getSignaturesForAddressRaced(new PublicKey(addr), {
+          options: { limit: 5 },
         });
         const lastSeen = entry.last.get(addr);
         for (const s of sigs) {
@@ -61,7 +60,7 @@ export async function startDevWalletMonitor(
             autoSnipeOnTokenProgram &&
             (await shouldTriggerAutoSnipe(chatId, s))
           ) {
-            const mint = await extractMintFromTx(conn, s);
+            const mint = await extractMintFromTx(s);
             if (mint) {
               await triggerAutoSnipe(chatId, mint, "dev-wallet");
             }
@@ -79,9 +78,9 @@ async function shouldTriggerAutoSnipe(chatId, sigInfo) {
   return state.autoSnipeOnPaste && (await hasUserWallet(chatId));
 }
 
-async function extractMintFromTx(connection, sigInfo) {
+async function extractMintFromTx(sigInfo) {
   try {
-    const tx = await connection.getTransaction(sigInfo.signature, {
+    const tx = await getTransactionRaced(sigInfo.signature, {
       maxSupportedTransactionVersion: 0,
     });
     const meta = tx?.meta;
@@ -118,32 +117,20 @@ async function triggerAutoSnipe(chatId, mint, source) {
       params: {
         amountSol: defaultSnipe,
         pollInterval,
-        slippageBps,
         retryCount,
+        slippageBps,
+        priorityFeeLamports,
         useJitoBundle,
       },
     });
+    startLiquidityWatch(chatId, mint).catch(() => {});
   } catch {}
-
-  startLiquidityWatch(chatId, {
-    mint,
-    amountSol: defaultSnipe,
-    priorityFeeLamports,
-    useJitoBundle,
-    pollInterval,
-    slippageBps,
-    retryCount,
-    source: `watch:${source}`,
-    signalType: "dev_wallet_activity",
-    onEvent: (m) => {
-      // Event handler will be provided by caller
-    },
-  });
 }
 
 export function stopDevWalletMonitor(chatId) {
   const k = `${chatId}:set`;
   const entry = monitors.get(k);
   if (entry?.interval) clearInterval(entry.interval);
+  if (entry) entry.interval = null;
   monitors.delete(k);
 }

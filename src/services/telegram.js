@@ -194,6 +194,30 @@ export async function startTelegramBot() {
 
   bot = new TelegramBot(token, { polling: true });
 
+  // Resilient polling error handling to recover from network resets (ECONNRESET/EFATAL)
+  bot.on("polling_error", async (err) => {
+    try {
+      const code = err?.code || "";
+      const message = err?.message || String(err || "");
+      console.warn("[polling_error]", { code, message });
+      if (message.includes("ECONNRESET") || String(code).includes("EFATAL")) {
+        try {
+          await bot.stopPolling();
+        } catch {}
+        setTimeout(() => {
+          try {
+            bot.startPolling();
+            console.log("Polling restarted after network reset");
+          } catch (e) {
+            console.error("Failed to restart polling:", e?.message || e);
+          }
+        }, 2500);
+      }
+    } catch (e) {
+      console.error("[polling_error handler failed]", e?.message || e);
+    }
+  });
+
   try {
     await bot.setMyCommands([
       { command: "start", description: "Initialize the bot" },
@@ -377,460 +401,548 @@ export async function startTelegramBot() {
     // try { console.log(`[DEBUG] callback_query data=${data} chatId=${chatId}`); } catch {}
     console.log(data);
 
-    if (data === "WALLETS_MENU") {
-      console.log(
-        `[DEBUG] WALLETS_MENU callback received for chatId: ${chatId}`
-      );
-      try {
-        await bot.answerCallbackQuery(query.id, {
-          text: "Opening Wallets...",
-        });
-      } catch {}
-      try {
+    // Refactored: consolidated handlers using switch(true)
+    switch (true) {
+      case data === "WALLETS_MENU": {
+        console.log(
+          `[DEBUG] WALLETS_MENU callback received for chatId: ${chatId}`
+        );
         try {
-          await bot.answerCallbackQuery(query.id, { text: "Wallets" });
+          await bot.answerCallbackQuery(query.id, {
+            text: "Opening Wallets...",
+          });
         } catch {}
-        console.log(`[DEBUG] Building wallets menu for chatId: ${chatId}`);
-        const menu = await buildWalletsMenu(chatId);
-        console.log(
-          `[DEBUG] Menu built successfully:`,
-          JSON.stringify(menu, null, 2)
-        );
-        await bot.editMessageText("💼 Wallets — manage your wallets", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: menu.reply_markup,
-        });
-        console.log(`[DEBUG] Message edited successfully`);
-      } catch (e) {
-        console.log(
-          `[DEBUG] Edit failed, trying sendMessage. Error:`,
-          e.message
-        );
         try {
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Wallets" });
+          } catch {}
+          console.log(`[DEBUG] Building wallets menu for chatId: ${chatId}`);
           const menu = await buildWalletsMenu(chatId);
-          await bot.sendMessage(chatId, "💼 Wallets — manage your wallets", {
+          console.log(
+            `[DEBUG] Menu built successfully:`,
+            JSON.stringify(menu, null, 2)
+          );
+          await bot.editMessageText("💼 Wallets — manage your wallets", {
+            chat_id: chatId,
+            message_id: messageId,
             reply_markup: menu.reply_markup,
           });
-          console.log(`[DEBUG] New message sent successfully`);
-        } catch (fallbackError) {
-          console.log(`[DEBUG] Fallback also failed:`, fallbackError.message);
-          await bot.sendMessage(
-            chatId,
-            `Failed to open Wallets: ${(e?.message || e)
-              .toString()
-              .slice(0, 200)}`
-          );
-        }
-      }
-      return;
-    }
-
-    if (data === "SETTINGS") {
-      console.log("CAlling settings");
-
-      console.log("Settings called");
-
-      try {
-        await bot.answerCallbackQuery(query.id);
-      } catch {}
-      try {
-        const markup = buildTurboSolSettingsMenu(chatId).reply_markup;
-        console.log(
-          `[DEBUG] Attempting editMessageText for SETTINGS chatId=${chatId} messageId=${messageId}`
-        );
-        await bot.editMessageText("⚙️ TurboSol Settings", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: markup,
-        });
-        console.log(
-          `[DEBUG] editMessageText succeeded for SETTINGS chatId=${chatId}`
-        );
-      } catch (e1) {
-        try {
-          console.error(
-            `[ERROR] editMessageText failed for SETTINGS:`,
-            e1?.response?.body || e1?.message || e1
-          );
+          console.log(`[DEBUG] Message edited successfully`);
+        } catch (e) {
           console.log(
-            `[DEBUG] Attempting editMessageReplyMarkup as fallback for SETTINGS chatId=${chatId} messageId=${messageId}`
+            `[DEBUG] Edit failed, trying sendMessage. Error:`,
+            e.message
           );
-          await bot.editMessageReplyMarkup(
-            buildTurboSolSettingsMenu(chatId).reply_markup,
-            {
-              chat_id: chatId,
-              message_id: messageId,
-            }
-          );
-          console.log(
-            `[DEBUG] editMessageReplyMarkup succeeded for SETTINGS chatId=${chatId}`
-          );
-        } catch (e2) {
           try {
-            console.error(
-              `[ERROR] editMessageReplyMarkup failed for SETTINGS:`,
-              e2?.response?.body || e2?.message || e2
-            );
-            console.log(
-              `[DEBUG] Sending new message for SETTINGS as last resort chatId=${chatId}`
-            );
-            await bot.sendMessage(chatId, "⚙️ TurboSol Settings", {
-              reply_markup: buildTurboSolSettingsMenu(chatId).reply_markup,
+            const menu = await buildWalletsMenu(chatId);
+            await bot.sendMessage(chatId, "💼 Wallets — manage your wallets", {
+              reply_markup: menu.reply_markup,
             });
-          } catch (e3) {
-            console.error(
-              `[ERROR] sendMessage failed for SETTINGS:`,
-              e3?.response?.body || e3?.message || e3
+            console.log(`[DEBUG] New message sent successfully`);
+          } catch (fallbackError) {
+            console.log(`[DEBUG] Fallback also failed:`, fallbackError.message);
+            await bot.sendMessage(
+              chatId,
+              `Failed to open Wallets: ${(e?.message || e)
+                .toString()
+                .slice(0, 200)}`
             );
           }
         }
+        return;
       }
-      return;
-    }
-    if (data === "AUTOMATION") {
-      try {
-        await bot.answerCallbackQuery(query.id, { text: "Automation" });
-      } catch {}
-      try {
-        await bot.editMessageText("🤖 Automation", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildAutomationMenu(chatId).reply_markup,
-        });
-      } catch (e) {
-        await bot.sendMessage(chatId, "🤖 Automation", {
-          reply_markup: buildAutomationMenu(chatId).reply_markup,
-        });
-      }
-      return;
-    }
 
-    if (data === "REFRESH") {
-      const welcome = await buildTurboSolWelcomeMessage(chatId);
-      await bot.sendMessage(chatId, welcome);
-      return bot.sendMessage(chatId, "Choose an option:", {
-        reply_markup: buildMainMenu(chatId).reply_markup,
-      });
-    }
-
-    if (data === "CLOSE_MENU") {
-      try {
-        await bot.deleteMessage(chatId, messageId);
-      } catch {}
-      return;
-    }
-
-    if (data === "COPY_TRADE") {
-      try {
-        await bot.answerCallbackQuery(query.id, { text: "Copy Trade" });
-      } catch {}
-      try {
-        await bot.editMessageText("🤖 Copy Trade", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
-        });
-      } catch (e) {
-        await bot.sendMessage(chatId, "🤖 Copy Trade", {
-          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
-        });
-      }
-      return;
-    }
-
-    // Copy Trade dashboard back
-    if (data === "CT_BACK") {
-      try {
-        await bot.editMessageText("🤖 Copy Trade", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
-        });
-      } catch (e) {
-        await bot.sendMessage(chatId, "🤖 Copy Trade", {
-          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
-        });
-      }
-      return;
-    }
-
-    // Toggle global Copy Trade enable
-    if (data === "CT_ENABLE_TOGGLE") {
-      const ct = getCopyTradeState(chatId);
-      setCopyTradeEnabled(chatId, !ct.enabled);
-      try {
-        await bot.editMessageText("🤖 Copy Trade", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
-        });
-      } catch (e) {
-        await bot.sendMessage(chatId, "🤖 Copy Trade", {
-          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
-        });
-      }
-      return;
-    }
-
-    // Start Add Wallet flow
-    if (data === "CT_ADD_WALLET") {
-      setPendingInput(chatId, { type: "CT_ADD_WALLET_ADDRESS" });
-      await bot.sendMessage(
-        chatId,
-        "➕ Copy Trade — Add Wallet\n\nPlease send the Solana address of the wallet you want to follow.\nType 'cancel' to abort.",
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
-            ],
-          },
-        }
-      );
-      return;
-    }
-
-    // Remove followed wallet
-    if (data.startsWith("CT_RM_")) {
-      const address = data.slice("CT_RM_".length);
-      removeCopyTradeWallet(chatId, address);
-      try {
-        await bot.editMessageText("🤖 Copy Trade", {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
-        });
-      } catch (e) {
-        await bot.sendMessage(chatId, "🤖 Copy Trade", {
-          reply_markup: buildCopyTradeMenu(chatId).reply_markup,
-        });
-      }
-      return;
-    }
-
-    // Open per-wallet config
-    if (data.startsWith("CT_W_")) {
-      const address = data.slice("CT_W_".length);
-      const title = `📍 Wallet ${shortenAddress(address)}`;
-      try {
-        await bot.editMessageText(title, {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
-        });
-      } catch (e) {
-        await bot.sendMessage(chatId, title, {
-          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
-        });
-      }
-      return;
-    }
-
-    // Per-wallet toggles
-    if (data.startsWith("CT_W_ENABLE_TOGGLE_")) {
-      const address = data.slice("CT_W_ENABLE_TOGGLE_".length);
-      const ct = getCopyTradeState(chatId);
-      const w = (ct.followedWallets || []).find((x) => x.address === address);
-      if (w)
-        updateCopyTradeWallet(chatId, address, {
-          enabled: !(w.enabled !== false),
-        });
-      const title = `📍 Wallet ${shortenAddress(address)}`;
-      try {
-        await bot.editMessageText(title, {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
-        });
-      } catch (e) {
-        await bot.sendMessage(chatId, title, {
-          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
-        });
-      }
-      return;
-    }
-
-    if (data.startsWith("CT_W_BUY_TOGGLE_")) {
-      const address = data.slice("CT_W_BUY_TOGGLE_".length);
-      const ct = getCopyTradeState(chatId);
-      const w = (ct.followedWallets || []).find((x) => x.address === address);
-      if (w)
-        updateCopyTradeWallet(chatId, address, {
-          copyBuy: !(w.copyBuy !== false),
-        });
-      const title = `📍 Wallet ${shortenAddress(address)}`;
-      try {
-        await bot.editMessageText(title, {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
-        });
-      } catch (e) {
-        await bot.sendMessage(chatId, title, {
-          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
-        });
-      }
-      return;
-    }
-
-    if (data.startsWith("CT_W_SELL_TOGGLE_")) {
-      const address = data.slice("CT_W_SELL_TOGGLE_".length);
-      const ct = getCopyTradeState(chatId);
-      const w = (ct.followedWallets || []).find((x) => x.address === address);
-      if (w)
-        updateCopyTradeWallet(chatId, address, {
-          copySell: !(w.copySell !== false),
-        });
-      const title = `📍 Wallet ${shortenAddress(address)}`;
-      try {
-        await bot.editMessageText(title, {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
-        });
-      } catch (e) {
-        await bot.sendMessage(chatId, title, {
-          reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
-        });
-      }
-      return;
-    }
-
-    if (data === "WITHDRAW") {
-      setPendingInput(chatId, { type: "WITHDRAW_DEST" });
-      await bot.sendMessage(
-        chatId,
-        "💸 Withdraw SOL\n\nPlease enter the destination Solana address:",
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
-            ],
-          },
-        }
-      );
-      return;
-    }
-
-    if (data === "SUGGESTIONS") {
-      setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
-      await bot.sendMessage(
-        chatId,
-        "💡 Suggestions\n\nPlease send your idea or feedback as a message. We'll save it and review soon.",
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
-            ],
-          },
-        }
-      );
-      return;
-    }
-
-    if (data === "STOP_SNIPE") {
-      stopLiquidityWatch(chatId);
-      await bot.answerCallbackQuery(query.id, { text: "Stopped sniping" });
-      await bot.sendMessage(
-        chatId,
-        "Stopped all active liquidity watches for this chat."
-      );
-      return;
-    }
-
-    if (data === "ACTIVE_SNIPES") {
-      try {
-        const items = await loadActiveSnipesByChat(chatId);
-        const lines = (items || []).map((i) => {
-          const shortMint = i.mint
-            ? i.mint.slice(0, 6) + "…" + i.mint.slice(-4)
-            : "?";
-          const started = i.startedAt
-            ? new Date(i.startedAt).toLocaleTimeString()
-            : "?";
-          return `• ${shortMint} — ${i.amountSol} SOL (since ${started})`;
-        });
-        const keyboard = [
-          ...(items || []).map((i) => [
-            {
-              text: `🛑 Stop ${i.mint.slice(0, 6)}…${i.mint.slice(-4)}`,
-              callback_data: `STOP_SNIPE_BY_${i.mint}`,
-            },
-          ]),
-          [{ text: "⛔ Stop All", callback_data: "STOP_SNIPE" }],
-          [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
-        ];
-        const body = lines.length
-          ? `📋 Active Snipes (${lines.length})\n\n${lines.join("\n")}`
-          : "No active snipes for this chat.";
+      case data === "MAIN_MENU": {
         try {
-          await bot.editMessageText(body, {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: { inline_keyboard: keyboard },
-          });
-        } catch (e) {
-          await bot.sendMessage(chatId, body, {
-            reply_markup: { inline_keyboard: keyboard },
-          });
-        }
-      } catch (e) {
-        await bot.answerCallbackQuery(query.id, { text: "Failed to load" });
-      }
-      return;
-    }
-
-    if (data.startsWith("STOP_SNIPE_BY_")) {
-      const mint = data.replace("STOP_SNIPE_BY_", "");
-      try {
-        stopLiquidityWatch(chatId, mint);
-        try {
-          await markSnipeCancelled(chatId, mint, "stopped_by_user");
+          await bot.answerCallbackQuery(query.id, { text: "Main Menu" });
         } catch {}
-        await bot.answerCallbackQuery(query.id, {
-          text: `Stopped ${mint.slice(0, 6)}…${mint.slice(-4)}`,
-        });
-      } catch (e) {
-        await bot.answerCallbackQuery(query.id, { text: "Failed to stop" });
-      }
-      // Refresh the active snipes view
-      try {
-        const items = await loadActiveSnipesByChat(chatId);
-        const lines = (items || []).map((i) => {
-          const shortMint = i.mint
-            ? i.mint.slice(0, 6) + "…" + i.mint.slice(-4)
-            : "?";
-          const started = i.startedAt
-            ? new Date(i.startedAt).toLocaleTimeString()
-            : "?";
-          return `• ${shortMint} — ${i.amountSol} SOL (since ${started})`;
-        });
-        const keyboard = [
-          ...(items || []).map((i) => [
-            {
-              text: `🛑 Stop ${i.mint.slice(0, 6)}…${i.mint.slice(-4)}`,
-              callback_data: `STOP_SNIPE_BY_${i.mint}`,
-            },
-          ]),
-          [{ text: "⛔ Stop All", callback_data: "STOP_SNIPE" }],
-          [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
-        ];
-        const body = lines.length
-          ? `📋 Active Snipes (${lines.length})\n\n${lines.join("\n")}`
-          : "No active snipes for this chat.";
         try {
-          await bot.editMessageText(body, {
+          await bot.editMessageText("🏠 Main Menu", {
             chat_id: chatId,
             message_id: messageId,
-            reply_markup: { inline_keyboard: keyboard },
+            reply_markup: buildMainMenu(chatId).reply_markup,
           });
         } catch (e) {
-          await bot.sendMessage(chatId, body, {
-            reply_markup: { inline_keyboard: keyboard },
+          await bot.sendMessage(chatId, "🏠 Main Menu", {
+            reply_markup: buildMainMenu(chatId).reply_markup,
           });
         }
-      } catch {}
-      return;
+        return;
+      }
+
+      case data === "SETTINGS": {
+        console.log("CAlling settings");
+        console.log("Settings called");
+        try {
+          await bot.answerCallbackQuery(query.id);
+        } catch {}
+        try {
+          const markup = buildTurboSolSettingsMenu(chatId).reply_markup;
+          console.log(
+            `[DEBUG] Attempting editMessageText for SETTINGS chatId=${chatId} messageId=${messageId}`
+          );
+          await bot.editMessageText("⚙️ TurboSol Settings", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: markup,
+          });
+          console.log(
+            `[DEBUG] editMessageText succeeded for SETTINGS chatId=${chatId}`
+          );
+        } catch (e1) {
+          try {
+            console.error(
+              `[ERROR] editMessageText failed for SETTINGS:`,
+              e1?.response?.body || e1?.message || e1
+            );
+            console.log(
+              `[DEBUG] Attempting editMessageReplyMarkup as fallback for SETTINGS chatId=${chatId} messageId=${messageId}`
+            );
+            await bot.editMessageReplyMarkup(
+              buildTurboSolSettingsMenu(chatId).reply_markup,
+              {
+                chat_id: chatId,
+                message_id: messageId,
+              }
+            );
+            console.log(
+              `[DEBUG] editMessageReplyMarkup succeeded for SETTINGS chatId=${chatId}`
+            );
+          } catch (e2) {
+            try {
+              console.error(
+                `[ERROR] editMessageReplyMarkup failed for SETTINGS:`,
+                e2?.response?.body || e2?.message || e2
+              );
+                console.log(
+                  `[DEBUG] Sending new message for SETTINGS as last resort chatId=${chatId}`
+                );
+              await bot.sendMessage(chatId, "⚙️ TurboSol Settings", {
+                reply_markup: buildTurboSolSettingsMenu(chatId).reply_markup,
+              });
+            } catch (e3) {
+              console.error(
+                `[ERROR] sendMessage failed for SETTINGS:`,
+                e3?.response?.body || e3?.message || e3
+              );
+            }
+          }
+        }
+        return;
+      }
+
+      case data === "AUTOMATION": {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Automation" });
+        } catch {}
+        try {
+          await bot.editMessageText("🤖 Automation", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildAutomationMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🤖 Automation", {
+            reply_markup: buildAutomationMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data === "REFRESH": {
+        const welcome = await buildTurboSolWelcomeMessage(chatId);
+        await bot.sendMessage(chatId, welcome);
+        await bot.sendMessage(chatId, "Choose an option:", {
+          reply_markup: buildMainMenu(chatId).reply_markup,
+        });
+        return;
+      }
+
+      case data === "CLOSE_MENU": {
+        try {
+          await bot.deleteMessage(chatId, messageId);
+        } catch {}
+        return;
+      }
+
+      case data === "RPC_SETTINGS" || data === "RPC_CONFIG": {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "RPC Settings" });
+        } catch {}
+        try {
+          await bot.editMessageText("🌐 RPC Settings", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildRpcSettingsMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🌐 RPC Settings", {
+            reply_markup: buildRpcSettingsMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data === "COPY_TRADE": {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Copy Trade" });
+        } catch {}
+        try {
+          await bot.editMessageText("🤖 Copy Trade", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🤖 Copy Trade", {
+            reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data === "CT_BACK": {
+        try {
+          await bot.editMessageText("🤖 Copy Trade", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🤖 Copy Trade", {
+            reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data === "CT_ENABLE_TOGGLE": {
+        const ct = getCopyTradeState(chatId);
+        setCopyTradeEnabled(chatId, !ct.enabled);
+        try {
+          await bot.editMessageText("🤖 Copy Trade", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🤖 Copy Trade", {
+            reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data === "CT_ADD_WALLET": {
+        setPendingInput(chatId, { type: "CT_ADD_WALLET_ADDRESS" });
+        await bot.sendMessage(
+          chatId,
+          "➕ Copy Trade — Add Wallet\n\nPlease send the Solana address of the wallet you want to follow.\nType 'cancel' to abort.",
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
+              ],
+            },
+          }
+        );
+        return;
+      }
+
+      case data.startsWith("CT_RM_"): {
+        const address = data.slice("CT_RM_".length);
+        removeCopyTradeWallet(chatId, address);
+        try {
+          await bot.editMessageText("🤖 Copy Trade", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🤖 Copy Trade", {
+            reply_markup: buildCopyTradeMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data.startsWith("CT_W_ENABLE_TOGGLE_"): {
+        const address = data.slice("CT_W_ENABLE_TOGGLE_".length);
+        const ct = getCopyTradeState(chatId);
+        const w = (ct.followedWallets || []).find((x) => x.address === address);
+        if (w)
+          updateCopyTradeWallet(chatId, address, {
+            enabled: !(w.enabled !== false),
+          });
+        const title = `📍 Wallet ${shortenAddress(address)}`;
+        try {
+          await bot.editMessageText(title, {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, title, {
+            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data.startsWith("CT_W_BUY_TOGGLE_"): {
+        const address = data.slice("CT_W_BUY_TOGGLE_".length);
+        const ct = getCopyTradeState(chatId);
+        const w = (ct.followedWallets || []).find((x) => x.address === address);
+        if (w)
+          updateCopyTradeWallet(chatId, address, {
+            copyBuy: !(w.copyBuy !== false),
+          });
+        const title = `📍 Wallet ${shortenAddress(address)}`;
+        try {
+          await bot.editMessageText(title, {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, title, {
+            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data.startsWith("CT_W_SELL_TOGGLE_"): {
+        const address = data.slice("CT_W_SELL_TOGGLE_".length);
+        const ct = getCopyTradeState(chatId);
+        const w = (ct.followedWallets || []).find((x) => x.address === address);
+        if (w)
+          updateCopyTradeWallet(chatId, address, {
+            copySell: !(w.copySell !== false),
+          });
+        const title = `📍 Wallet ${shortenAddress(address)}`;
+        try {
+          await bot.editMessageText(title, {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, title, {
+            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data.startsWith("CT_W_"): {
+        const address = data.slice("CT_W_".length);
+        const title = `📍 Wallet ${shortenAddress(address)}`;
+        try {
+          await bot.editMessageText(title, {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, title, {
+            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data === "WITHDRAW": {
+        setPendingInput(chatId, { type: "WITHDRAW_DEST" });
+        await bot.sendMessage(
+          chatId,
+          "💸 Withdraw SOL\n\nPlease enter the destination Solana address:",
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
+              ],
+            },
+          }
+        );
+        return;
+      }
+
+      case data === "SUGGESTIONS": {
+        setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
+        await bot.sendMessage(
+          chatId,
+          "💡 Suggestions\n\nTell us how we can improve TurboSol.\n\nYou can suggest:\n• New features and automations (Copy Trade, LP sniping, dashboards)\n• UX improvements or missing shortcuts\n• RPC/Performance issues (region, latency, errors)\n• Integrations you want (exchanges, analytics)\n• Bug reports\n\nAbout TurboSol (quick tips):\n• Fast swaps via Jupiter with raced RPC reads and private-relay fallbacks\n• Quick Buy, Snipe LP Add, and Quote flows\n• Copy Trade with daily caps, fixed/percent buy, and sell grids\n• Risk checks for honeypot/locker/mint authority\n\nTap a template to start, then edit and send your message:",
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "✨ Feature idea", callback_data: "SUG_TPL_FEATURE" }],
+                [{ text: "🐞 Bug report", callback_data: "SUG_TPL_BUG" }],
+                [{ text: "⚙️ RPC/Performance", callback_data: "SUG_TPL_RPC" }],
+                [
+                  {
+                    text: "📈 Trading strategy",
+                    callback_data: "SUG_TPL_STRATEGY",
+                  },
+                ],
+                [
+                  { text: "ℹ️ Help", callback_data: "HELP" },
+                  { text: "🏠 Main", callback_data: "MAIN_MENU" },
+                ],
+              ],
+            },
+          }
+        );
+        return;
+      }
+
+      case data === "SUG_TPL_FEATURE": {
+        await bot.answerCallbackQuery(query.id, { text: "Feature idea" });
+        setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
+        await bot.sendMessage(
+          chatId,
+          "Suggestion: Feature idea\n\n• Problem you're facing:\n• Proposed feature:\n• Where in the bot it fits (menu/flow):\n• Why it's useful:\n• Priority for you (low/med/high):\n\nSend this as-is or edit it before sending."
+        );
+        return;
+      }
+
+      case data === "SUG_TPL_BUG": {
+        await bot.answerCallbackQuery(query.id, { text: "Bug report" });
+        setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
+        await bot.sendMessage(
+          chatId,
+          "Suggestion: Bug report\n\n• What happened:\n• Steps to reproduce:\n• Expected behavior:\n• Approx time/zone:\n• Any error text/logs you saw:\n\nSend this as-is or edit it before sending."
+        );
+        return;
+      }
+
+      case data === "SUG_TPL_RPC": {
+        await bot.answerCallbackQuery(query.id, { text: "RPC/Performance" });
+        setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
+        await bot.sendMessage(
+          chatId,
+          "Suggestion: RPC/Performance\n\n• Region/ISP:\n• Typical latency you see:\n• Errors seen (timeouts, 429, etc.):\n• Time of day it happens most:\n• Any custom RPCs you use:\n\nSend this as-is or edit it before sending."
+        );
+        return;
+      }
+
+      case data === "SUG_TPL_STRATEGY": {
+        await bot.answerCallbackQuery(query.id, { text: "Trading strategy" });
+        setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
+        await bot.sendMessage(
+          chatId,
+          "Suggestion: Trading strategy/defaults\n\n• How you size buys (fixed/percent):\n• Your daily cap target:\n• Preferred slippage and fees:\n• Sell grid or exit rules:\n• Any automation you want:\n\nSend this as-is or edit it before sending."
+        );
+        return;
+      }
+
+      case data === "STOP_SNIPE": {
+        stopLiquidityWatch(chatId);
+        await bot.answerCallbackQuery(query.id, { text: "Stopped sniping" });
+        await bot.sendMessage(
+          chatId,
+          "Stopped all active liquidity watches for this chat."
+        );
+        return;
+      }
+
+      case data === "ACTIVE_SNIPES": {
+        try {
+          const items = await loadActiveSnipesByChat(chatId);
+          const lines = (items || []).map((i) => {
+            const shortMint = i.mint
+              ? i.mint.slice(0, 6) + "…" + i.mint.slice(-4)
+              : "?";
+            const started = i.startedAt
+              ? new Date(i.startedAt).toLocaleTimeString()
+              : "?";
+            return `• ${shortMint} — ${i.amountSol} SOL (since ${started})`;
+          });
+          const keyboard = [
+            ...(items || []).map((i) => [
+              {
+                text: `🛑 Stop ${i.mint.slice(0, 6)}…${i.mint.slice(-4)}`,
+                callback_data: `STOP_SNIPE_BY_${i.mint}`,
+              },
+            ]),
+            [{ text: "⛔ Stop All", callback_data: "STOP_SNIPE" }],
+            [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
+          ];
+          const body = lines.length
+            ? `📋 Active Snipes (${lines.length})\n\n${lines.join("\n")}`
+            : "No active snipes for this chat.";
+          try {
+            await bot.editMessageText(body, {
+              chat_id: chatId,
+              message_id: messageId,
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          } catch (e) {
+            await bot.sendMessage(chatId, body, {
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          }
+        } catch (e) {
+          await bot.answerCallbackQuery(query.id, { text: "Failed to load" });
+        }
+        return;
+      }
+
+      case data.startsWith("STOP_SNIPE_BY_"): {
+        const mint = data.replace("STOP_SNIPE_BY_", "");
+        try {
+          stopLiquidityWatch(chatId, mint);
+          try {
+            await markSnipeCancelled(chatId, mint, "stopped_by_user");
+          } catch {}
+          await bot.answerCallbackQuery(query.id, {
+            text: `Stopped ${mint.slice(0, 6)}…${mint.slice(-4)}`,
+          });
+        } catch (e) {
+          await bot.answerCallbackQuery(query.id, { text: "Failed to stop" });
+        }
+        // Refresh the active snipes view
+        try {
+          const items = await loadActiveSnipesByChat(chatId);
+          const lines = (items || []).map((i) => {
+            const shortMint = i.mint
+              ? i.mint.slice(0, 6) + "…" + i.mint.slice(-4)
+              : "?";
+            const started = i.startedAt
+              ? new Date(i.startedAt).toLocaleTimeString()
+              : "?";
+            return `• ${shortMint} — ${i.amountSol} SOL (since ${started})`;
+          });
+          const keyboard = [
+            ...(items || []).map((i) => [
+              {
+                text: `🛑 Stop ${i.mint.slice(0, 6)}…${i.mint.slice(-4)}`,
+                callback_data: `STOP_SNIPE_BY_${i.mint}`,
+              },
+            ]),
+            [{ text: "⛔ Stop All", callback_data: "STOP_SNIPE" }],
+            [{ text: "🔙 Back", callback_data: "MAIN_MENU" }],
+          ];
+          const body = lines.length
+            ? `📋 Active Snipes (${lines.length})\n\n${lines.join("\n")}`
+            : "No active snipes for this chat.";
+          try {
+            await bot.editMessageText(body, {
+              chat_id: chatId,
+              message_id: messageId,
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          } catch (e) {
+            await bot.sendMessage(chatId, body, {
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          }
+        } catch {}
+        return;
+      }
+
+      default:
+        break;
     }
     if (data === "QUICK_BUY") {
       try {
@@ -1087,10 +1199,46 @@ export async function startTelegramBot() {
     if (data === "HELP") {
       try {
         await bot.answerCallbackQuery(query.id, { text: "Help" });
-        const helpText = `🚀 **TurboSol Help**\n\n**Main Commands:**\n• /start - Initialize the bot\n• /setup - Create new wallet\n• /import <privateKey> - Import existing wallet\n• /address - Show wallet address
-• /lasttx [n] - Show last n transactions (max 5)
+        const helpText = `🚀 TurboSol Help
 
-**Quick Actions:**\n• **Wallet** - Manage your wallets\n• **Quick Buy** - Buy tokens with default settings\n• **Snipe LP Add** - Snipe tokens when liquidity is added\n• **Quote** - Get token price quotes\n\n**Text Commands:**\n• Send token address to get buy/snipe options\n• \`quote <mint> <sol_amount>\` - Get price quote\n• \`buy <mint> <sol_amount>\` - Buy tokens\n• \`snipe <mint> <sol_amount>\` - Start sniping\n\n**Settings:**\n• \`fee <lamports>\` - Set priority fee\n• \`jito on/off\` - Toggle Jito bundling\n• \`tier\` - View current tier and limits\n\n**Automation:**\n• Open the Automation menu to toggle Pump.fun launch alerts and more.\n\nFor more help, contact support.`;
+What can I do?
+• Quick Buy, Snipe LP Add, Quote prices
+• Copy Trade with daily caps, fixed/percent sizing, and sell grids
+• Risk checks (honeypot, mint authority, locker) and route safety
+• Faster swaps via raced RPC reads + private relay fallbacks
+
+Core commands
+• /start — Initialize the bot
+• /setup — Create a new wallet
+• /import <privateKey> — Import existing wallet
+• /address — Show current wallet address
+• /lasttx [n] — Show last n tx (max 5)
+
+Text shortcuts
+• Send a token address (mint) to get Buy/Snipe options
+• quote <mint> <sol_amount> — Get a price quote
+• buy <mint> <sol_amount> — Quick buy
+• snipe <mint> <sol_amount> — Start an LP-add snipe
+
+Settings
+• fee <lamports> — Set priority fee
+• jito on/off — Toggle Jito bundling
+• tier — View your tier and limits
+
+Copy Trade tips
+• Supports fixed SOL amounts or percent-of-balance
+• Enforce per-trade and daily caps to manage risk
+• Sells can be auto-sized and capped by grid rules
+
+Safety
+• We attempt honeypot/mint-authority/locker checks where possible
+• Routes are validated and can fall back to private relays to reduce MEV
+
+Need more?
+• Open Automation for Pump.fun and more alerts
+• Use Suggestions to send feedback or request features
+
+For support, reply here and we’ll follow up.`;
         await bot.sendMessage(chatId, helpText, { parse_mode: "Markdown" });
       } catch (e) {
         await bot.sendMessage(chatId, `Help failed: ${e?.message || e}`);
@@ -1527,24 +1675,6 @@ export async function startTelegramBot() {
         return;
       }
 
-      if (data === "RPC_SETTINGS" || data === "RPC_CONFIG") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "RPC Settings" });
-        } catch {}
-        try {
-          await bot.editMessageText("🌐 RPC Settings", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: buildRpcSettingsMenu(chatId).reply_markup,
-          });
-        } catch (e) {
-          await bot.sendMessage(chatId, "🌐 RPC Settings", {
-            reply_markup: buildRpcSettingsMenu(chatId).reply_markup,
-          });
-        }
-        return;
-      }
-
       // Fee Settings navigation
       if (data === "FEE_SETTINGS") {
         try {
@@ -1794,24 +1924,6 @@ export async function startTelegramBot() {
           chatId,
           `💰 Quote - ${tokenNameSym}\n\nEnter amount in SOL to quote (last: ${last} SOL):`
         );
-        return;
-      }
-
-      if (data === "MAIN_MENU") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Main Menu" });
-        } catch {}
-        try {
-          await bot.editMessageText("🏠 Main Menu", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: buildMainMenu(chatId).reply_markup,
-          });
-        } catch (e) {
-          await bot.sendMessage(chatId, "🏠 Main Menu", {
-            reply_markup: buildMainMenu(chatId).reply_markup,
-          });
-        }
         return;
       }
 

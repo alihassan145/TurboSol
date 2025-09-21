@@ -6,7 +6,7 @@ import { recordPriorityFeeFeedback } from "./fees.js";
 // In-memory endpoint stats for scoring and backoff
 const endpointStats = new Map();
 const SEND_TIMEOUT_MS = Number(process.env.RPC_SEND_TIMEOUT_MS || 2000);
-const READ_TIMEOUT_MS = Number(process.env.RPC_READ_TIMEOUT_MS || 5000);
+const READ_TIMEOUT_MS = Number(process.env.RPC_READ_TIMEOUT_MS || 8000);
 const STAGGER_STEP_MS = Number(process.env.RPC_STAGGER_STEP_MS || 20);
 const INTER_WAVE_DELAY_MS = Number(process.env.RPC_INTER_WAVE_DELAY_MS || 40);
 const MAX_BACKOFF_MS = 60_000;
@@ -604,7 +604,7 @@ async function raceReadAcrossEndpoints({ callImpl, microBatch = 2 }) {
 }
 
 export function getDefaultReadMicroBatch() {
-  const s = Number(process.env.READ_MICRO_BATCH || 2);
+  const s = Number(process.env.RPC_READ_MICRO_BATCH || process.env.READ_MICRO_BATCH || 2);
   return Number.isFinite(s) && s > 0 ? s : 2;
 }
 

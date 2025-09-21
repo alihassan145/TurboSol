@@ -1,3 +1,5 @@
+import { PublicKey } from '@solana/web3.js';
+import { getSignaturesForAddressRaced } from './rpc.js';
 // Dev Wallet Fingerprinting & Alpha Feeds Service
 class DevWalletFingerprintingService {
   constructor(connection) {
@@ -26,8 +28,8 @@ class DevWalletFingerprintingService {
 
   async analyzeCreationPattern(address) {
     try {
-      const signatures = await this.connection.getSignaturesForAddress(
-        new PublicKey(address), { limit: 100 }
+      const signatures = await getSignaturesForAddressRaced(
+        new PublicKey(address), { options: { limit: 100 } }
       );
       
       return {
