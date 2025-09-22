@@ -550,8 +550,74 @@ export async function startTelegramBot() {
       await safeEditMarkup(buildAutomationMenu(chatId).reply_markup);
     };
 
+    // Centralized settings toggle handler
+    const handleSettingsToggle = async () => {
+      console.log("[DEBUG] Toggle handler hit:", data, "chat:", chatId);
+      await ack();
+      try {
+        if (data === "TOGGLE_TIER") {
+          const order = ["basic", "plus", "pro"];
+          const cur = (getUserState(chatId).tier || "basic").toLowerCase();
+          const idx = order.indexOf(cur);
+          const next = order[(idx + 1) % order.length];
+          updateUserSetting(chatId, "tier", next);
+        } else {
+          const keyMap = {
+            TOGGLE_DEGEN: "degenMode",
+            TOGGLE_BUY_PROTECTION: "buyProtection",
+            TOGGLE_EXPERT: "expertMode",
+            TOGGLE_PNL: "privatePnl",
+            TOGGLE_RELAY: "enablePrivateRelay",
+            TOGGLE_BEHAVIOR: "enableBehaviorProfiling",
+            TOGGLE_MULTIHOP: "enableMultiHopCorrelation",
+            TOGGLE_FUNDING: "enableFundingPathAnalysis",
+            TOGGLE_DYNAMIC_TIP: "dynamicPriorityFee",
+          };
+          const key = keyMap[data];
+          if (!key) return;
+          const current = !!getUserState(chatId)[key];
+          updateUserSetting(chatId, key, !current);
+        }
+
+        const onRpcPage =
+          data === "TOGGLE_DYNAMIC_TIP" ||
+          (query?.message?.text || "").startsWith("🌐 RPC Settings");
+        const markup = onRpcPage
+          ? buildRpcSettingsMenu(chatId).reply_markup
+          : buildTurboSolSettingsMenu(chatId).reply_markup;
+        const title = onRpcPage ? "🌐 RPC Settings" : "⚙️ TurboSol Settings";
+        if (!(await safeEditMarkup(markup))) {
+          if (!(await safeEditText(title, markup))) {
+            try {
+              await bot.sendMessage(chatId, title, { reply_markup: markup });
+            } catch {}
+          }
+        }
+      } catch (e) {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
+        } catch {}
+      }
+    };
+
     // Refactored: consolidated handlers using switch(true)
     switch (true) {
+      case [
+        "TOGGLE_DEGEN",
+        "TOGGLE_BUY_PROTECTION",
+        "TOGGLE_EXPERT",
+        "TOGGLE_PNL",
+        "TOGGLE_RELAY",
+        "TOGGLE_TIER",
+        "TOGGLE_BEHAVIOR",
+        "TOGGLE_MULTIHOP",
+        "TOGGLE_FUNDING",
+        "TOGGLE_DYNAMIC_TIP",
+      ].includes(data): {
+        await handleSettingsToggle();
+        return;
+      }
+
       case data === "WALLETS_MENU": {
         await openWalletsMenu();
         return;
@@ -2105,67 +2171,6 @@ For support, reply here and we’ll follow up.`;
         );
         return;
       }
-
-      // Toggle handlers for settings
-      if (
-        [
-          "TOGGLE_DEGEN",
-          "TOGGLE_BUY_PROTECTION",
-          "TOGGLE_EXPERT",
-          "TOGGLE_PNL",
-          "TOGGLE_RELAY",
-          "TOGGLE_TIER",
-          "TOGGLE_BEHAVIOR",
-          "TOGGLE_MULTIHOP",
-          "TOGGLE_FUNDING",
-          "TOGGLE_DYNAMIC_TIP",
-        ].includes(data)
-      ) {
-        await ack();
-        try {
-          if (data === "TOGGLE_TIER") {
-            const order = ["basic", "plus", "pro"];
-            const cur = (getUserState(chatId).tier || "basic").toLowerCase();
-            const idx = order.indexOf(cur);
-            const next = order[(idx + 1) % order.length];
-            updateUserSetting(chatId, "tier", next);
-          } else {
-            const keyMap = {
-              TOGGLE_DEGEN: "degenMode",
-              TOGGLE_BUY_PROTECTION: "buyProtection",
-              TOGGLE_EXPERT: "expertMode",
-              TOGGLE_PNL: "privatePnl",
-              TOGGLE_RELAY: "enablePrivateRelay",
-              TOGGLE_BEHAVIOR: "enableBehaviorProfiling",
-              TOGGLE_MULTIHOP: "enableMultiHopCorrelation",
-              TOGGLE_FUNDING: "enableFundingPathAnalysis",
-              TOGGLE_DYNAMIC_TIP: "dynamicPriorityFee",
-            };
-            const key = keyMap[data];
-            const current = !!getUserState(chatId)[key];
-            updateUserSetting(chatId, key, !current);
-          }
-
-          // Refresh the correct menu
-          const onRpcPage = data === "TOGGLE_DYNAMIC_TIP" || (query?.message?.text || "").startsWith("🌐 RPC Settings");
-          const markup = onRpcPage
-            ? buildRpcSettingsMenu(chatId).reply_markup
-            : buildTurboSolSettingsMenu(chatId).reply_markup;
-
-          if (!(await safeEditMarkup(markup))) {
-            await safeEditText(
-              onRpcPage ? "🌐 RPC Settings" : "⚙️ TurboSol Settings",
-              markup
-            );
-          }
-        } catch (e) {
-          try {
-            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
-          } catch {}
-        }
-        return;
-      }
-
       if (data.startsWith("REQUOTE_")) {
         const mint = data.slice("REQUOTE_".length);
         try {
