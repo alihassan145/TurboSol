@@ -30,6 +30,11 @@ const PERSISTED_KEYS = new Set([
   "privatePnl",
   "enablePrivateRelay",
   "rpcStrategy",
+  "dynamicPriorityFee",
+  // Analytics toggles
+  "enableBehaviorProfiling",
+  "enableMultiHopCorrelation",
+  "enableFundingPathAnalysis",
   // Liquidity Delta per-chat overrides
   "liqDeltaProbeSol",
   "liqDeltaMinImprovPct",
@@ -128,6 +133,7 @@ export function getUserState(chatId) {
       enablePrivateRelay: false, // use private relay for tx submission instead of public RPC when possible
       // Add RPC strategy selector (affects micro-batch racing behavior)
       rpcStrategy: "balanced", // one of: "conservative" | "balanced" | "aggressive"
+      dynamicPriorityFee: false, // Dynamic tip adjustment based on network conditions
       // Analytics toggles
       enableBehaviorProfiling: false,
       enableMultiHopCorrelation: false,

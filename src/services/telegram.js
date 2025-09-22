@@ -401,241 +401,190 @@ export async function startTelegramBot() {
     // try { console.log(`[DEBUG] callback_query data=${data} chatId=${chatId}`); } catch {}
     console.log(data);
 
+    // Helper utilities for callback actions (acknowledge + safe edits)
+    const ack = async (text) => {
+      try {
+        if (text) {
+          await bot.answerCallbackQuery(query.id, { text });
+        } else {
+          await bot.answerCallbackQuery(query.id);
+        }
+      } catch {}
+    };
+
+    const safeEditText = async (text, reply_markup) => {
+      try {
+        await bot.editMessageText(text, {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup,
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const safeEditMarkup = async (reply_markup) => {
+      try {
+        await bot.editMessageReplyMarkup(reply_markup, {
+          chat_id: chatId,
+          message_id: messageId,
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    // Menu handlers
+    const openWalletsMenu = async () => {
+      try {
+        await ack("Wallets");
+      } catch {}
+      try {
+        const menu = await buildWalletsMenu(chatId);
+        const edited = await safeEditText(
+          "💼 Wallets — manage your wallets",
+          menu.reply_markup
+        );
+        if (!edited) {
+          await bot.sendMessage(chatId, "💼 Wallets — manage your wallets", {
+            reply_markup: menu.reply_markup,
+          });
+        }
+      } catch (e) {
+        try {
+          const menu = await buildWalletsMenu(chatId);
+          await bot.sendMessage(chatId, "💼 Wallets — manage your wallets", {
+            reply_markup: menu.reply_markup,
+          });
+        } catch (fallbackError) {
+          await bot.sendMessage(
+            chatId,
+            `Failed to open Wallets: ${(e?.message || e)
+              .toString()
+              .slice(0, 200)}`
+          );
+        }
+      }
+    };
+
+    const openMainMenu = async () => {
+      await ack("Main Menu");
+      const markup = buildMainMenu(chatId).reply_markup;
+      const ok = await safeEditText("🏠 Main Menu", markup);
+      if (!ok) {
+        await bot.sendMessage(chatId, "🏠 Main Menu", {
+          reply_markup: markup,
+        });
+      }
+    };
+
+    const openSettingsMenu = async () => {
+      await ack();
+      const markup = buildTurboSolSettingsMenu(chatId).reply_markup;
+      if (!(await safeEditText("⚙️ TurboSol Settings", markup))) {
+        if (!(await safeEditMarkup(markup))) {
+          await bot.sendMessage(chatId, "⚙️ TurboSol Settings", {
+            reply_markup: markup,
+          });
+        }
+      }
+    };
+
+    const openAutomationMenu = async () => {
+      await ack("Automation");
+      const markup = buildAutomationMenu(chatId).reply_markup;
+      if (!(await safeEditText("🤖 Automation", markup))) {
+        await bot.sendMessage(chatId, "🤖 Automation", {
+          reply_markup: markup,
+        });
+      }
+    };
+
+    // Toggle handlers
+    const toggleAutoSnipe = async () => {
+      const current = !!getUserState(chatId).autoSnipeMode;
+      const next = !current;
+      updateUserSetting(chatId, "autoSnipeMode", next);
+      await ack(next ? "Auto snipe ON" : "Auto snipe OFF");
+      await safeEditMarkup(buildAutomationMenu(chatId).reply_markup);
+    };
+
+    const toggleAfkMode = async () => {
+      const current = !!getUserState(chatId).afkMode;
+      const next = !current;
+      updateUserSetting(chatId, "afkMode", next);
+      await ack(next ? "AFK mode ON" : "AFK mode OFF");
+      await safeEditMarkup(buildAutomationMenu(chatId).reply_markup);
+    };
+
+    const togglePrelp = async () => {
+      const current = !!getUserState(chatId).preLPWatchEnabled;
+      const next = !current;
+      updateUserSetting(chatId, "preLPWatchEnabled", next);
+      if (next) {
+        await startPreLPWatch(chatId, {
+          onEvent: (ev) => {
+            try {
+              bot.sendMessage(
+                chatId,
+                typeof ev === "string" ? ev : ev?.type || "prelp"
+              );
+            } catch {}
+          },
+          onSnipeEvent: (mint, m) => {
+            try {
+              bot.sendMessage(chatId, `[PreLP ${mint}] ${m}`);
+            } catch {}
+          },
+          autoSnipeOnPreLP: true,
+        });
+      } else {
+        try {
+          stopPreLPWatch(chatId);
+        } catch {}
+      }
+      await ack(next ? "Pre-LP ON" : "Pre-LP OFF");
+      await safeEditMarkup(buildAutomationMenu(chatId).reply_markup);
+    };
+
     // Refactored: consolidated handlers using switch(true)
     switch (true) {
       case data === "WALLETS_MENU": {
-        console.log(
-          `[DEBUG] WALLETS_MENU callback received for chatId: ${chatId}`
-        );
-        try {
-          await bot.answerCallbackQuery(query.id, {
-            text: "Opening Wallets...",
-          });
-        } catch {}
-        try {
-          try {
-            await bot.answerCallbackQuery(query.id, { text: "Wallets" });
-          } catch {}
-          console.log(`[DEBUG] Building wallets menu for chatId: ${chatId}`);
-          const menu = await buildWalletsMenu(chatId);
-          console.log(
-            `[DEBUG] Menu built successfully:`,
-            JSON.stringify(menu, null, 2)
-          );
-          await bot.editMessageText("💼 Wallets — manage your wallets", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: menu.reply_markup,
-          });
-          console.log(`[DEBUG] Message edited successfully`);
-        } catch (e) {
-          console.log(
-            `[DEBUG] Edit failed, trying sendMessage. Error:`,
-            e.message
-          );
-          try {
-            const menu = await buildWalletsMenu(chatId);
-            await bot.sendMessage(chatId, "💼 Wallets — manage your wallets", {
-              reply_markup: menu.reply_markup,
-            });
-            console.log(`[DEBUG] New message sent successfully`);
-          } catch (fallbackError) {
-            console.log(`[DEBUG] Fallback also failed:`, fallbackError.message);
-            await bot.sendMessage(
-              chatId,
-              `Failed to open Wallets: ${(e?.message || e)
-                .toString()
-                .slice(0, 200)}`
-            );
-          }
-        }
+        await openWalletsMenu();
         return;
       }
 
       case data === "MAIN_MENU": {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Main Menu" });
-        } catch {}
-        try {
-          await bot.editMessageText("🏠 Main Menu", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: buildMainMenu(chatId).reply_markup,
-          });
-        } catch (e) {
-          await bot.sendMessage(chatId, "🏠 Main Menu", {
-            reply_markup: buildMainMenu(chatId).reply_markup,
-          });
-        }
+        await openMainMenu();
         return;
       }
 
       case data === "SETTINGS": {
-        console.log("CAlling settings");
-        console.log("Settings called");
-        try {
-          await bot.answerCallbackQuery(query.id);
-        } catch {}
-        try {
-          const markup = buildTurboSolSettingsMenu(chatId).reply_markup;
-          console.log(
-            `[DEBUG] Attempting editMessageText for SETTINGS chatId=${chatId} messageId=${messageId}`
-          );
-          await bot.editMessageText("⚙️ TurboSol Settings", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: markup,
-          });
-          console.log(
-            `[DEBUG] editMessageText succeeded for SETTINGS chatId=${chatId}`
-          );
-        } catch (e1) {
-          try {
-            console.error(
-              `[ERROR] editMessageText failed for SETTINGS:`,
-              e1?.response?.body || e1?.message || e1
-            );
-            console.log(
-              `[DEBUG] Attempting editMessageReplyMarkup as fallback for SETTINGS chatId=${chatId} messageId=${messageId}`
-            );
-            await bot.editMessageReplyMarkup(
-              buildTurboSolSettingsMenu(chatId).reply_markup,
-              {
-                chat_id: chatId,
-                message_id: messageId,
-              }
-            );
-            console.log(
-              `[DEBUG] editMessageReplyMarkup succeeded for SETTINGS chatId=${chatId}`
-            );
-          } catch (e2) {
-            try {
-              console.error(
-                `[ERROR] editMessageReplyMarkup failed for SETTINGS:`,
-                e2?.response?.body || e2?.message || e2
-              );
-                console.log(
-                  `[DEBUG] Sending new message for SETTINGS as last resort chatId=${chatId}`
-                );
-              await bot.sendMessage(chatId, "⚙️ TurboSol Settings", {
-                reply_markup: buildTurboSolSettingsMenu(chatId).reply_markup,
-              });
-            } catch (e3) {
-              console.error(
-                `[ERROR] sendMessage failed for SETTINGS:`,
-                e3?.response?.body || e3?.message || e3
-              );
-            }
-          }
-        }
+        await openSettingsMenu();
         return;
       }
 
       case data === "AUTOMATION": {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Automation" });
-        } catch {}
-        try {
-          await bot.editMessageText("🤖 Automation", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: buildAutomationMenu(chatId).reply_markup,
-          });
-        } catch (e) {
-          await bot.sendMessage(chatId, "🤖 Automation", {
-            reply_markup: buildAutomationMenu(chatId).reply_markup,
-          });
-        }
+        await openAutomationMenu();
         return;
       }
 
       // Automation toggles moved into switch to avoid startsWith() collisions
       case data === "AUTO_SNIPE_TOGGLE": {
-        console.log("Toggle auto snipe");
-        try {
-          const current = !!getUserState(chatId).autoSnipeMode;
-          const next = !current;
-          updateUserSetting(chatId, "autoSnipeMode", next);
-          try {
-            await bot.answerCallbackQuery(query.id, {
-              text: next ? "Auto snipe ON" : "Auto snipe OFF",
-            });
-          } catch {}
-          await bot.editMessageReplyMarkup(
-            buildAutomationMenu(chatId).reply_markup,
-            { chat_id: chatId, message_id: messageId }
-          );
-        } catch (e) {
-          try {
-            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
-          } catch {}
-        }
+        await toggleAutoSnipe();
         return;
       }
 
       case data === "AFK_MODE_TOGGLE": {
-        try {
-          const current = !!getUserState(chatId).afkMode;
-          const next = !current;
-          updateUserSetting(chatId, "afkMode", next);
-          try {
-            await bot.answerCallbackQuery(query.id, {
-              text: next ? "AFK mode ON" : "AFK mode OFF",
-            });
-          } catch {}
-          await bot.editMessageReplyMarkup(
-            buildAutomationMenu(chatId).reply_markup,
-            { chat_id: chatId, message_id: messageId }
-          );
-        } catch (e) {
-          try {
-            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
-          } catch {}
-        }
+        await toggleAfkMode();
         return;
       }
 
       case data === "PRELP_TOGGLE": {
-        try {
-          const current = !!getUserState(chatId).preLPWatchEnabled;
-          const next = !current;
-          updateUserSetting(chatId, "preLPWatchEnabled", next);
-          if (next) {
-            await startPreLPWatch(chatId, {
-              onEvent: (ev) => {
-                try {
-                  bot.sendMessage(
-                    chatId,
-                    typeof ev === "string" ? ev : ev?.type || "prelp"
-                  );
-                } catch {}
-              },
-              onSnipeEvent: (mint, m) => {
-                try {
-                  bot.sendMessage(chatId, `[PreLP ${mint}] ${m}`);
-                } catch {}
-              },
-              autoSnipeOnPreLP: true,
-            });
-          } else {
-            try {
-              stopPreLPWatch(chatId);
-            } catch {}
-          }
-          try {
-            await bot.answerCallbackQuery(query.id, {
-              text: next ? "Pre-LP ON" : "Pre-LP OFF",
-            });
-          } catch {}
-          await bot.editMessageReplyMarkup(
-            buildAutomationMenu(chatId).reply_markup,
-            { chat_id: chatId, message_id: messageId }
-          );
-        } catch (e) {
-          try {
-            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
-          } catch {}
-        }
+        await togglePrelp();
         return;
       }
 
@@ -663,6 +612,8 @@ export async function startTelegramBot() {
 
       case data === "PUMPFUN_TOGGLE": {
         try {
+          console.log("Pump toggle");
+
           const current = getUserState(chatId).pumpFunAlerts;
           const next = !current;
           updateUserSetting(chatId, "pumpFunAlerts", next);
@@ -757,6 +708,42 @@ export async function startTelegramBot() {
         } catch (e) {
           console.error("PUMPFUN_TOGGLE error:", e);
           await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
+        }
+        return;
+      }
+
+      case data === "SNIPE_DEFAULTS": {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Snipe Defaults" });
+        } catch {}
+        try {
+          await bot.editMessageText("🎯 Snipe Defaults", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🎯 Snipe Defaults", {
+            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data === "AUTO_SNIPE_CONFIG": {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Snipe Defaults" });
+        } catch {}
+        try {
+          await bot.editMessageText("🎯 Snipe Defaults", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "🎯 Snipe Defaults", {
+            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
+          });
         }
         return;
       }
@@ -891,11 +878,13 @@ export async function startTelegramBot() {
           await bot.editMessageText(title, {
             chat_id: chatId,
             message_id: messageId,
-            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address)
+              .reply_markup,
           });
         } catch (e) {
           await bot.sendMessage(chatId, title, {
-            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address)
+              .reply_markup,
           });
         }
         return;
@@ -914,11 +903,13 @@ export async function startTelegramBot() {
           await bot.editMessageText(title, {
             chat_id: chatId,
             message_id: messageId,
-            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address)
+              .reply_markup,
           });
         } catch (e) {
           await bot.sendMessage(chatId, title, {
-            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address)
+              .reply_markup,
           });
         }
         return;
@@ -937,11 +928,13 @@ export async function startTelegramBot() {
           await bot.editMessageText(title, {
             chat_id: chatId,
             message_id: messageId,
-            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address)
+              .reply_markup,
           });
         } catch (e) {
           await bot.sendMessage(chatId, title, {
-            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address)
+              .reply_markup,
           });
         }
         return;
@@ -954,11 +947,13 @@ export async function startTelegramBot() {
           await bot.editMessageText(title, {
             chat_id: chatId,
             message_id: messageId,
-            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address)
+              .reply_markup,
           });
         } catch (e) {
           await bot.sendMessage(chatId, title, {
-            reply_markup: buildCopyTradeWalletMenu(chatId, address).reply_markup,
+            reply_markup: buildCopyTradeWalletMenu(chatId, address)
+              .reply_markup,
           });
         }
         return;
@@ -2111,6 +2106,66 @@ For support, reply here and we’ll follow up.`;
         return;
       }
 
+      // Toggle handlers for settings
+      if (
+        [
+          "TOGGLE_DEGEN",
+          "TOGGLE_BUY_PROTECTION",
+          "TOGGLE_EXPERT",
+          "TOGGLE_PNL",
+          "TOGGLE_RELAY",
+          "TOGGLE_TIER",
+          "TOGGLE_BEHAVIOR",
+          "TOGGLE_MULTIHOP",
+          "TOGGLE_FUNDING",
+          "TOGGLE_DYNAMIC_TIP",
+        ].includes(data)
+      ) {
+        await ack();
+        try {
+          if (data === "TOGGLE_TIER") {
+            const order = ["basic", "plus", "pro"];
+            const cur = (getUserState(chatId).tier || "basic").toLowerCase();
+            const idx = order.indexOf(cur);
+            const next = order[(idx + 1) % order.length];
+            updateUserSetting(chatId, "tier", next);
+          } else {
+            const keyMap = {
+              TOGGLE_DEGEN: "degenMode",
+              TOGGLE_BUY_PROTECTION: "buyProtection",
+              TOGGLE_EXPERT: "expertMode",
+              TOGGLE_PNL: "privatePnl",
+              TOGGLE_RELAY: "enablePrivateRelay",
+              TOGGLE_BEHAVIOR: "enableBehaviorProfiling",
+              TOGGLE_MULTIHOP: "enableMultiHopCorrelation",
+              TOGGLE_FUNDING: "enableFundingPathAnalysis",
+              TOGGLE_DYNAMIC_TIP: "dynamicPriorityFee",
+            };
+            const key = keyMap[data];
+            const current = !!getUserState(chatId)[key];
+            updateUserSetting(chatId, key, !current);
+          }
+
+          // Refresh the correct menu
+          const onRpcPage = data === "TOGGLE_DYNAMIC_TIP" || (query?.message?.text || "").startsWith("🌐 RPC Settings");
+          const markup = onRpcPage
+            ? buildRpcSettingsMenu(chatId).reply_markup
+            : buildTurboSolSettingsMenu(chatId).reply_markup;
+
+          if (!(await safeEditMarkup(markup))) {
+            await safeEditText(
+              onRpcPage ? "🌐 RPC Settings" : "⚙️ TurboSol Settings",
+              markup
+            );
+          }
+        } catch (e) {
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Toggle failed" });
+          } catch {}
+        }
+        return;
+      }
+
       if (data.startsWith("REQUOTE_")) {
         const mint = data.slice("REQUOTE_".length);
         try {
@@ -2139,42 +2194,7 @@ For support, reply here and we’ll follow up.`;
         return;
       }
 
-      if (data === "SNIPE_DEFAULTS") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Snipe Defaults" });
-        } catch {}
-        try {
-          await bot.editMessageText("🎯 Snipe Defaults", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
-          });
-        } catch (e) {
-          await bot.sendMessage(chatId, "🎯 Snipe Defaults", {
-            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
-          });
-        }
-        return;
-      }
-
-      // Automation -> Auto Snipe Config maps to Snipe Defaults page
-      if (data === "AUTO_SNIPE_CONFIG") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Snipe Defaults" });
-        } catch {}
-        try {
-          await bot.editMessageText("🎯 Snipe Defaults", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
-          });
-        } catch (e) {
-          await bot.sendMessage(chatId, "🎯 Snipe Defaults", {
-            reply_markup: buildSnipeDefaultsMenu(chatId).reply_markup,
-          });
-        }
-        return;
-      }
+      // moved SNIPE_DEFAULTS and AUTO_SNIPE_CONFIG handling into switch(true) cases above
 
       if (data === "CREATE_WALLET") {
         try {
@@ -2396,62 +2416,6 @@ For support, reply here and we’ll follow up.`;
         await bot.answerCallbackQuery(query.id, { text: "Stats sent" });
         return;
       }
-
-      // Toggle handlers for settings
-      if (
-        [
-          "TOGGLE_DEGEN",
-          "TOGGLE_BUY_PROTECTION",
-          "TOGGLE_EXPERT",
-          "TOGGLE_PNL",
-          "TOGGLE_RELAY",
-          "TOGGLE_TIER",
-          "TOGGLE_BEHAVIOR",
-          "TOGGLE_MULTIHOP",
-          "TOGGLE_FUNDING",
-        ].includes(data)
-      ) {
-        if (data === "TOGGLE_TIER") {
-          const order = ["basic", "plus", "pro"];
-          const cur = (getUserState(chatId).tier || "basic").toLowerCase();
-          const idx = order.indexOf(cur);
-          const next = order[(idx + 1) % order.length];
-          updateUserSetting(chatId, "tier", next);
-          await bot.editMessageReplyMarkup(
-            buildTurboSolSettingsMenu(chatId).reply_markup,
-            {
-              chat_id: chatId,
-              message_id: messageId,
-            }
-          );
-          return;
-        }
-        const keyMap = {
-          TOGGLE_DEGEN: "degenMode",
-          TOGGLE_BUY_PROTECTION: "buyProtection",
-          TOGGLE_EXPERT: "expertMode",
-          TOGGLE_PNL: "privatePnl",
-          TOGGLE_RELAY: "enablePrivateRelay",
-          TOGGLE_BEHAVIOR: "enableBehaviorProfiling",
-          TOGGLE_MULTIHOP: "enableMultiHopCorrelation",
-          TOGGLE_FUNDING: "enableFundingPathAnalysis",
-        };
-        const key = keyMap[data];
-        const current = getUserState(chatId)[key];
-        updateUserSetting(chatId, key, !current);
-        const isRpcPage = (query?.message?.text || "").startsWith(
-          "🌐 RPC Settings"
-        );
-        const markup = isRpcPage
-          ? buildRpcSettingsMenu(chatId).reply_markup
-          : buildTurboSolSettingsMenu(chatId).reply_markup;
-        await bot.editMessageReplyMarkup(markup, {
-          chat_id: chatId,
-          message_id: messageId,
-        });
-        return;
-      }
-
       // Snipe Defaults toggles
       if (["TOGGLE_AUTO_SNIPE_PASTE", "TOGGLE_SNIPE_JITO"].includes(data)) {
         const keyMap = {
@@ -2470,7 +2434,6 @@ For support, reply here and we’ll follow up.`;
         );
         return;
       }
-
 
       // Snipe Defaults numeric inputs
       if (
