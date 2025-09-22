@@ -848,6 +848,42 @@ export async function startTelegramBot() {
         return;
       }
 
+      case data === "DELTA_SETTINGS": {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Delta Settings" });
+        } catch {}
+        try {
+          await bot.editMessageText("📊 Delta Settings", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildDeltaSettingsMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "📊 Delta Settings", {
+            reply_markup: buildDeltaSettingsMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+
+      case data === "FEE_SETTINGS": {
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Fee Settings" });
+        } catch {}
+        try {
+          await bot.editMessageText("💰 Fee Settings", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: buildFeeSettingsMenu(chatId).reply_markup,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, "💰 Fee Settings", {
+            reply_markup: buildFeeSettingsMenu(chatId).reply_markup,
+          });
+        }
+        return;
+      }
+ 
       case data === "COPY_TRADE": {
         try {
           await bot.answerCallbackQuery(query.id, { text: "Copy Trade" });
@@ -1949,23 +1985,6 @@ For support, reply here and we’ll follow up.`;
       }
 
       // Fee Settings navigation
-      if (data === "FEE_SETTINGS") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Fee Settings" });
-        } catch {}
-        try {
-          await bot.editMessageText("💰 Fee Settings", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: buildFeeSettingsMenu(chatId).reply_markup,
-          });
-        } catch (e) {
-          await bot.sendMessage(chatId, "💰 Fee Settings", {
-            reply_markup: buildFeeSettingsMenu(chatId).reply_markup,
-          });
-        }
-        return;
-      }
 
       // Fee Settings actions
       if (data === "SET_PRIORITY_FEE") {
@@ -2134,23 +2153,6 @@ For support, reply here and we’ll follow up.`;
         return;
       }
 
-      if (data === "DELTA_SETTINGS") {
-        try {
-          await bot.answerCallbackQuery(query.id, { text: "Delta Settings" });
-        } catch {}
-        try {
-          await bot.editMessageText("📊 Delta Settings", {
-            chat_id: chatId,
-            message_id: messageId,
-            reply_markup: buildDeltaSettingsMenu(chatId).reply_markup,
-          });
-        } catch (e) {
-          await bot.sendMessage(chatId, "📊 Delta Settings", {
-            reply_markup: buildDeltaSettingsMenu(chatId).reply_markup,
-          });
-        }
-        return;
-      }
 
       if (data.startsWith("REBUY_")) {
         const mint = data.slice("REBUY_".length);
