@@ -1082,11 +1082,10 @@ export async function startTelegramBot() {
         setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
         await bot.sendMessage(
           chatId,
-          "💡 Suggestions\n\nTell us how we can improve TurboSol.\n\nYou can suggest:\n• New features and automations (Copy Trade, LP sniping, dashboards)\n• UX improvements or missing shortcuts\n• RPC/Performance issues (region, latency, errors)\n• Integrations you want (exchanges, analytics)\n• Bug reports\n\nAbout TurboSol (quick tips):\n• Fast swaps via Jupiter with raced RPC reads and private-relay fallbacks\n• Quick Buy, Snipe LP Add, and Quote flows\n• Copy Trade with daily caps, fixed/percent buy, and sell grids\n• Risk checks for honeypot/locker/mint authority\n\nTap a template to start, then edit and send your message:",
+          "💡 Suggestions\n\nTell us how we can improve TurboSol.\n\nHow it works:\n• Tap a template below (Bug report, RPC/Performance, Strategy, Feature).\n• I will open a reply box. Type your message and press Send.\n• I’ll save it and the team will review.\n\nYou can suggest:\n• New features and automations (Copy Trade, LP sniping, dashboards)\n• UX improvements or missing shortcuts\n• RPC/Performance issues (region, latency, errors)\n• Integrations you want (exchanges, analytics)\n• Bug reports\n\nTap a template to start:",
           {
             reply_markup: {
               inline_keyboard: [
-                [{ text: "✨ Feature idea", callback_data: "SUG_TPL_FEATURE" }],
                 [{ text: "🐞 Bug report", callback_data: "SUG_TPL_BUG" }],
                 [{ text: "⚙️ RPC/Performance", callback_data: "SUG_TPL_RPC" }],
                 [
@@ -1095,6 +1094,7 @@ export async function startTelegramBot() {
                     callback_data: "SUG_TPL_STRATEGY",
                   },
                 ],
+                [{ text: "✨ Feature idea", callback_data: "SUG_TPL_FEATURE" }],
                 [
                   { text: "ℹ️ Help", callback_data: "HELP" },
                   { text: "🏠 Main", callback_data: "MAIN_MENU" },
@@ -1111,7 +1111,13 @@ export async function startTelegramBot() {
         setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
         await bot.sendMessage(
           chatId,
-          "Suggestion: Feature idea\n\n• Problem you're facing:\n• Proposed feature:\n• Where in the bot it fits (menu/flow):\n• Why it's useful:\n• Priority for you (low/med/high):\n\nSend this as-is or edit it before sending."
+          "Suggestion: Feature idea\n\nReply to this message with your idea. You can free‑type or answer the bullets below.\n\n• Problem you're facing:\n• Proposed feature:\n• Where in the bot it fits (menu/flow):\n• Why it's useful:\n• Priority for you (low/med/high):\n\nExample:\n• Problem: Hard to manage multiple wallets quickly\n• Feature: Quick Wallet Switcher in Main > Wallet\n• Fit: Main menu top row\n• Why: Saves time during copy trades\n• Priority: High",
+          {
+            reply_markup: {
+              force_reply: true,
+              input_field_placeholder: "Type your feature idea…",
+            },
+          }
         );
         return;
       }
@@ -1121,7 +1127,13 @@ export async function startTelegramBot() {
         setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
         await bot.sendMessage(
           chatId,
-          "Suggestion: Bug report\n\n• What happened:\n• Steps to reproduce:\n• Expected behavior:\n• Approx time/zone:\n• Any error text/logs you saw:\n\nSend this as-is or edit it before sending."
+          "Suggestion: Bug report\n\nReply to this message with the details.\n\n• What happened:\n• Steps to reproduce:\n• Expected behavior:\n• Approx time/zone:\n• Any error text/logs you saw:\n\nExample:\n• What happened: Quote failed with 429 errors\n• Steps: Quick Buy > SOL 0.05 > token XYZ\n• Expected: Route found and swap sent\n• Time/zone: 21:30 UK\n• Errors: 429 from public RPC",
+          {
+            reply_markup: {
+              force_reply: true,
+              input_field_placeholder: "Describe the bug…",
+            },
+          }
         );
         return;
       }
@@ -1131,7 +1143,13 @@ export async function startTelegramBot() {
         setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
         await bot.sendMessage(
           chatId,
-          "Suggestion: RPC/Performance\n\n• Region/ISP:\n• Typical latency you see:\n• Errors seen (timeouts, 429, etc.):\n• Time of day it happens most:\n• Any custom RPCs you use:\n\nSend this as-is or edit it before sending."
+          "Suggestion: RPC/Performance\n\nReply to this message with your environment and what you see.\n\n• Region/ISP:\n• Typical latency you see:\n• Errors seen (timeouts, 429, etc.):\n• Time of day it happens most:\n• Any custom RPCs you use:\n\nExample:\n• Region/ISP: UK / EE\n• Latency: 300–500ms to public RPCs\n• Errors: 429 when busy\n• Time: 9–11pm local\n• Custom RPCs: Helius primary, Triton fallback",
+          {
+            reply_markup: {
+              force_reply: true,
+              input_field_placeholder: "Share RPC details…",
+            },
+          }
         );
         return;
       }
@@ -1141,7 +1159,13 @@ export async function startTelegramBot() {
         setPendingInput(chatId, { type: "SUGGESTION_TEXT" });
         await bot.sendMessage(
           chatId,
-          "Suggestion: Trading strategy/defaults\n\n• How you size buys (fixed/percent):\n• Your daily cap target:\n• Preferred slippage and fees:\n• Sell grid or exit rules:\n• Any automation you want:\n\nSend this as-is or edit it before sending."
+          "Suggestion: Trading strategy/defaults\n\nReply to this message with your preferences.\n\n• How you size buys (fixed/percent):\n• Your daily cap target:\n• Preferred slippage and fees:\n• Sell grid or exit rules:\n• Any automation you want:\n\nExample:\n• Size: 0.03 SOL per buy (or 2% of wallet)\n• Daily cap: 1.5 SOL\n• Slippage/fees: 1.5% with Jito tips off by default\n• Exit: Take‑profit 25/50/100% at 1.5x/2x/3x, SL 25%\n• Automation: Auto‑sell dust under 0.003 SOL",
+          {
+            reply_markup: {
+              force_reply: true,
+              input_field_placeholder: "Describe your strategy…",
+            },
+          }
         );
         return;
       }
@@ -1509,42 +1533,49 @@ export async function startTelegramBot() {
     if (data === "HELP") {
       try {
         await bot.answerCallbackQuery(query.id, { text: "Help" });
-        const helpText = `🚀 TurboSol — How to use
+        const howTo = `🚀 How to use TurboSol\n\nMain menu\n• Wallet — View address/balance, fund or withdraw, and switch wallets\n• Quick Buy — Paste a mint or Jupiter link, then enter SOL; supports flags (fee=, jito=, split=, wallets=)\n• Quick Sell — Sell your current token by % or fixed amount\n• Snipe LP Add — Configure an LP-add snipe for a mint\n• Stop Snipe — Stop an active snipe\n• Active Snipes — View and manage your running snipes\n• Quote — Get a live price quote for a mint\n• Settings — Priority fee, Jito, slippage, default buy, risk checks, limits\n• Copy Trade — Follow wallets; set sizing (fixed/%), daily caps, sell grids\n• Withdraw — Send SOL or tokens out to another address\n• Refresh — Refresh the dashboard card\n• Automation — Set up Pump.fun and other automations\n• Help — Show this guide\n\nQuick actions\n• Paste a token mint to get Buy / Snipe / Quote options\n• Paste a Jupiter URL to quickly Buy or view a Quote\n• Quick Buy amount can include flags (optional): fee=5000 jito=true split=true wallets=3\n\nSlash commands\n• /start — Initialize the bot\n• /setup — Create a new wallet\n• /import <privateKey> — Import a wallet\n• /address — Show your wallet address\n• /lasttx [n] — Show last n transactions (max 5)`;
+        const help = `ℹ️ Help & safety\n\nSafety and performance\n• Risk checks: honeypot, mint authority, locker (when available)\n• Fast swaps via raced RPC reads and private relay fallbacks\n\nSupport\n• Reply here and we’ll follow up.`;
+        const keyboard = {
+          inline_keyboard: [
+            [
+              { text: "How to use", callback_data: "HELP_TAB_HOWTO" },
+              { text: "Help", callback_data: "HELP_TAB_HELP" }
+            ],
+            [ { text: "🏠 Main", callback_data: "MAIN_MENU" } ]
+          ]
+        };
+        await bot.sendMessage(chatId, howTo, { reply_markup: keyboard });
+      } catch (e) {
+        await bot.sendMessage(chatId, `Help failed: ${e?.message || e}`);
+      }
+      return;
+    }
 
-Main menu
-• Wallet — View address/balance, fund or withdraw, and switch wallets
-• Quick Buy — Paste a mint or Jupiter link, then enter SOL; supports flags (fee=, jito=, split=, wallets=)
-• Quick Sell — Sell your current token by % or fixed amount
-• Snipe LP Add — Configure an LP-add snipe for a mint
-• Stop Snipe — Stop an active snipe
-• Active Snipes — View and manage your running snipes
-• Quote — Get a live price quote for a mint
-• Settings — Priority fee, Jito, slippage, default buy, risk checks, limits
-• Copy Trade — Follow wallets; set sizing (fixed/%), daily caps, sell grids
-• Withdraw — Send SOL or tokens out to another address
-• Refresh — Refresh the dashboard card
-• Automation — Set up Pump.fun and other automations
-• Help — Show this guide
-
-Quick actions
-• Paste a token mint to get Buy / Snipe / Quote options
-• Paste a Jupiter URL to quickly Buy or view a Quote
-• Quick Buy amount can include flags (optional): fee=5000 jito=true split=true wallets=3
-
-Slash commands
-• /start — Initialize the bot
-• /setup — Create a new wallet
-• /import <privateKey> — Import a wallet
-• /address — Show your wallet address
-• /lasttx [n] — Show last n transactions (max 5)
-
-Safety and performance
-• Risk checks: honeypot, mint authority, locker (when available)
-• Fast swaps via raced RPC reads and private relay fallbacks
-
-Need help?
-• Reply here and we’ll follow up.`;
-        await bot.sendMessage(chatId, helpText);
+    if (data === "HELP_TAB_HOWTO" || data === "HELP_TAB_HELP") {
+      try {
+        const howTo = `🚀 How to use TurboSol\n\nMain menu\n• Wallet — View address/balance, fund or withdraw, and switch wallets\n• Quick Buy — Paste a mint or Jupiter link, then enter SOL; supports flags (fee=, jito=, split=, wallets=)\n• Quick Sell — Sell your current token by % or fixed amount\n• Snipe LP Add — Configure an LP-add snipe for a mint\n• Stop Snipe — Stop an active snipe\n• Active Snipes — View and manage your running snipes\n• Quote — Get a live price quote for a mint\n• Settings — Priority fee, Jito, slippage, default buy, risk checks, limits\n• Copy Trade — Follow wallets; set sizing (fixed/%), daily caps, sell grids\n• Withdraw — Send SOL or tokens out to another address\n• Refresh — Refresh the dashboard card\n• Automation — Set up Pump.fun and other automations\n• Help — Show this guide\n\nQuick actions\n• Paste a token mint to get Buy / Snipe / Quote options\n• Paste a Jupiter URL to quickly Buy or view a Quote\n• Quick Buy amount can include flags (optional): fee=5000 jito=true split=true wallets=3\n\nSlash commands\n• /start — Initialize the bot\n• /setup — Create a new wallet\n• /import <privateKey> — Import a wallet\n• /address — Show your wallet address\n• /lasttx [n] — Show last n transactions (max 5)`;
+        const help = `ℹ️ Help & safety\n\nSafety and performance\n• Risk checks: honeypot, mint authority, locker (when available)\n• Fast swaps via raced RPC reads and private relay fallbacks\n\nSupport\n• Reply here and we’ll follow up.`;
+        const isHowTo = data === "HELP_TAB_HOWTO";
+        const text = isHowTo ? howTo : help;
+        const keyboard = {
+          inline_keyboard: [
+            [
+              { text: "How to use", callback_data: "HELP_TAB_HOWTO" },
+              { text: "Help", callback_data: "HELP_TAB_HELP" }
+            ],
+            [ { text: "🏠 Main", callback_data: "MAIN_MENU" } ]
+          ]
+        };
+        // try edit in place, fallback to send
+        const ok = await (async () => {
+          try {
+            await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, reply_markup: keyboard });
+            return true;
+          } catch { return false; }
+        })();
+        if (!ok) {
+          await bot.sendMessage(chatId, text, { reply_markup: keyboard });
+        }
       } catch (e) {
         await bot.sendMessage(chatId, `Help failed: ${e?.message || e}`);
       }
