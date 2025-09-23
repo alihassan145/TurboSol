@@ -170,6 +170,8 @@ export async function getWalletInfo(chatId = null) {
   return {
     address,
     shortAddress: shortenAddress(address),
+    // provide both numeric and formatted values for compatibility across UI builders
+    sol: solBalance,
     solBalance: solBalance.toFixed(4),
     usdBalance,
     solPrice,

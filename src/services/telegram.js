@@ -180,12 +180,13 @@ async function buildTurboSolWelcomeMessage(chatId) {
       fractionalSecondDigits: 3,
     });
 
-    const balanceStatus =
-      parseFloat(info.solBalance) === 0
-        ? "🔴 You currently have no SOL in your wallet.\nTo start trading, please deposit SOL to your address."
-        : "🟢 Your wallet is funded and ready for trading!";
+    const solNum = typeof info.sol === "number" ? info.sol : parseFloat(info.solBalance);
+    const solText = Number.isFinite(solNum) ? solNum.toFixed(4) : "?";
+    const balanceStatus = Number.isFinite(solNum) && solNum > 0
+      ? "🟢 Your wallet is funded and ready for trading!"
+      : "🔴 You currently have no SOL in your wallet.\nTo start trading, please deposit SOL to your address.";
 
-    return `🚀 Welcome to TurboSol!\n\nYour Solana Wallet:\n\n→ W1: ${info.address}\nBalance: ${info.solBalance} SOL (USD $${info.usdBalance})\n\n${balanceStatus}\n\n🕒 Last updated: ${timestamp}`;
+    return `🚀 Welcome to TurboSol!\n\nYour Solana Wallet:\n\n→ W1: ${info.address}\nBalance: ${solText} SOL (USD $${info.usdBalance})\n\n${balanceStatus}\n\n🕒 Last updated: ${timestamp}`;
   }
   return `🚀 Welcome to TurboSol!\n\n🔴 No wallet linked to your account.\n\nUse /setup to generate a new wallet or /import <privateKeyBase58> to import an existing one.`;
 }
