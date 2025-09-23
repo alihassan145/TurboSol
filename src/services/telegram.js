@@ -624,6 +624,42 @@ export async function startTelegramBot() {
         return;
       }
 
+      // Ensure wallet actions are handled early in the switch
+      case data === "CREATE_WALLET": {
+        try {
+          const res = await createUserWallet(chatId);
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Wallet created" });
+          } catch {}
+        } catch (e) {
+          const msg = e?.message || String(e);
+          try {
+            await bot.answerCallbackQuery(query.id, { text: msg.slice(0, 200) });
+          } catch {}
+          await bot.sendMessage(chatId, `Create wallet failed: ${msg}`);
+        }
+        try {
+          const menu = await buildWalletsMenu(chatId);
+          await bot.editMessageReplyMarkup(menu.reply_markup, {
+            chat_id: chatId,
+            message_id: messageId,
+          });
+        } catch {}
+        return;
+      }
+
+      case data === "IMPORT_WALLET": {
+        setPendingInput(chatId, { type: "IMPORT_WALLET" });
+        try {
+          await bot.answerCallbackQuery(query.id, { text: "Awaiting private key…" });
+        } catch {}
+        await bot.sendMessage(
+          chatId,
+          "Send your private key in Base58 to import your wallet.\nWarning: Only share with trusted bots. You can revoke access anytime."
+        );
+        return;
+      }
+
       case data === "MAIN_MENU": {
         await openMainMenu();
         return;
@@ -884,7 +920,7 @@ export async function startTelegramBot() {
         }
         return;
       }
- 
+
       case data === "COPY_TRADE": {
         try {
           await bot.answerCallbackQuery(query.id, { text: "Copy Trade" });
@@ -1539,10 +1575,10 @@ export async function startTelegramBot() {
           inline_keyboard: [
             [
               { text: "How to use", callback_data: "HELP_TAB_HOWTO" },
-              { text: "Help", callback_data: "HELP_TAB_HELP" }
+              { text: "Help", callback_data: "HELP_TAB_HELP" },
             ],
-            [ { text: "🏠 Main", callback_data: "MAIN_MENU" } ]
-          ]
+            [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
+          ],
         };
         await bot.sendMessage(chatId, howTo, { reply_markup: keyboard });
       } catch (e) {
@@ -1561,17 +1597,23 @@ export async function startTelegramBot() {
           inline_keyboard: [
             [
               { text: "How to use", callback_data: "HELP_TAB_HOWTO" },
-              { text: "Help", callback_data: "HELP_TAB_HELP" }
+              { text: "Help", callback_data: "HELP_TAB_HELP" },
             ],
-            [ { text: "🏠 Main", callback_data: "MAIN_MENU" } ]
-          ]
+            [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
+          ],
         };
         // try edit in place, fallback to send
         const ok = await (async () => {
           try {
-            await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, reply_markup: keyboard });
+            await bot.editMessageText(text, {
+              chat_id: chatId,
+              message_id: messageId,
+              reply_markup: keyboard,
+            });
             return true;
-          } catch { return false; }
+          } catch {
+            return false;
+          }
         })();
         if (!ok) {
           await bot.sendMessage(chatId, text, { reply_markup: keyboard });
@@ -2179,7 +2221,6 @@ export async function startTelegramBot() {
         }
         return;
       }
-
 
       if (data.startsWith("REBUY_")) {
         const mint = data.slice("REBUY_".length);
@@ -3241,7 +3282,7 @@ export async function startTelegramBot() {
           const parsedAmount = parseFloat(parts[0]);
           const amountSol = Number.isFinite(parsedAmount)
             ? parsedAmount
-            : (state.defaultBuySol ?? 0.05);
+            : state.defaultBuySol ?? 0.05;
           const flags = parseFlags(parts.slice(1));
           try {
             const s = getUserState(chatId);
@@ -3352,17 +3393,20 @@ export async function startTelegramBot() {
             if (!txid) throw new Error("Swap succeeded but no txid returned");
             const solscan = `https://solscan.io/tx/${txid}`;
             const symbol = Array.isArray(swapRes)
-              ? (swapRes[0]?.output?.symbol || "TOKEN")
-              : (swapRes?.output?.symbol || "TOKEN");
+              ? swapRes[0]?.output?.symbol || "TOKEN"
+              : swapRes?.output?.symbol || "TOKEN";
             const totalOut = Array.isArray(swapRes)
-              ? swapRes.reduce((acc, r) => acc + (Number(r?.output?.tokensOut) || 0), 0)
-              : (Number(swapRes?.output?.tokensOut) || 0);
+              ? swapRes.reduce(
+                  (acc, r) => acc + (Number(r?.output?.tokensOut) || 0),
+                  0
+                )
+              : Number(swapRes?.output?.tokensOut) || 0;
             const tokOut = totalOut ? totalOut.toFixed(4) : "?";
             const impact = Array.isArray(swapRes)
               ? "(split across wallets)"
-              : (swapRes?.route?.priceImpactPct != null
-                  ? `${swapRes.route.priceImpactPct}%`
-                  : "?");
+              : swapRes?.route?.priceImpactPct != null
+              ? `${swapRes.route.priceImpactPct}%`
+              : "?";
             await bot.sendMessage(
               chatId,
               `✅ Buy sent\n• Token: ${symbol} (${tokenAddress})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${
@@ -3381,7 +3425,10 @@ export async function startTelegramBot() {
               mint: tokenAddress,
               sol: Number(amountSol),
               tokens: Array.isArray(swapRes)
-                ? swapRes.reduce((acc, r) => acc + (Number(r?.output?.tokensOut) || 0), 0)
+                ? swapRes.reduce(
+                    (acc, r) => acc + (Number(r?.output?.tokensOut) || 0),
+                    0
+                  )
                 : Number(swapRes?.output?.tokensOut ?? NaN),
               route: swapRes?.route?.labels,
               priceImpactPct: swapRes?.route?.priceImpactPct ?? null,

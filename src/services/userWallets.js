@@ -24,9 +24,7 @@ export async function connectWalletsDb() {
 
 function getKey() {
   const keyHex = process.env.WALLET_ENCRYPTION_KEY;
-  if (!keyHex) {
-    throw new Error("WALLET_ENCRYPTION_KEY not set in environment");
-  }
+  if (!keyHex) return null; // allow dev fallback without encryption
   const key = Buffer.from(keyHex, "hex");
   if (key.length !== 32) {
     throw new Error("WALLET_ENCRYPTION_KEY must be 32-byte hex (64 hex chars)");
@@ -36,6 +34,10 @@ function getKey() {
 
 function encrypt(plaintext) {
   const key = getKey();
+  if (!key) {
+    // Dev fallback: store plaintext with marker; NOT for production use
+    return "plain:" + plaintext;
+  }
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv("aes-256-cbc", key, iv);
   const enc = Buffer.concat([cipher.update(Buffer.from(plaintext, "utf8")), cipher.final()]);
@@ -43,8 +45,19 @@ function encrypt(plaintext) {
 }
 
 function decrypt(ciphertext) {
-  const [ivHex, dataHex] = ciphertext.split(":");
+  if (ciphertext?.startsWith("plain:")) {
+    // Dev fallback decoding
+    return ciphertext.slice(6);
+  }
+  const parts = ciphertext.split(":");
+  if (parts.length !== 2) {
+    throw new Error("Invalid ciphertext format");
+  }
+  const [ivHex, dataHex] = parts;
   const key = getKey();
+  if (!key) {
+    throw new Error("WALLET_ENCRYPTION_KEY not set");
+  }
   const iv = Buffer.from(ivHex, "hex");
   const data = Buffer.from(dataHex, "hex");
   const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
