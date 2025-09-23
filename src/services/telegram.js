@@ -33,6 +33,7 @@ import {
   listUserWallets,
   setActiveWallet,
   renameUserWallet,
+  getAllUserWalletKeypairs,
 } from "./userWallets.js";
 import {
   getWalletInfo,
@@ -1508,47 +1509,42 @@ export async function startTelegramBot() {
     if (data === "HELP") {
       try {
         await bot.answerCallbackQuery(query.id, { text: "Help" });
-        const helpText = `🚀 TurboSol Help
+        const helpText = `🚀 TurboSol — How to use
 
-What can I do?
-• Quick Buy, Snipe LP Add, Quote prices
-• Copy Trade with daily caps, fixed/percent sizing, and sell grids
-• Risk checks (honeypot, mint authority, locker) and route safety
-• Faster swaps via raced RPC reads + private relay fallbacks
+Main menu
+• Wallet — View address/balance, fund or withdraw, and switch wallets
+• Quick Buy — Paste a mint or Jupiter link, then enter SOL; supports flags (fee=, jito=, split=, wallets=)
+• Quick Sell — Sell your current token by % or fixed amount
+• Snipe LP Add — Configure an LP-add snipe for a mint
+• Stop Snipe — Stop an active snipe
+• Active Snipes — View and manage your running snipes
+• Quote — Get a live price quote for a mint
+• Settings — Priority fee, Jito, slippage, default buy, risk checks, limits
+• Copy Trade — Follow wallets; set sizing (fixed/%), daily caps, sell grids
+• Withdraw — Send SOL or tokens out to another address
+• Refresh — Refresh the dashboard card
+• Automation — Set up Pump.fun and other automations
+• Help — Show this guide
 
-Core commands
+Quick actions
+• Paste a token mint to get Buy / Snipe / Quote options
+• Paste a Jupiter URL to quickly Buy or view a Quote
+• Quick Buy amount can include flags (optional): fee=5000 jito=true split=true wallets=3
+
+Slash commands
 • /start — Initialize the bot
 • /setup — Create a new wallet
-• /import <privateKey> — Import existing wallet
-• /address — Show current wallet address
-• /lasttx [n] — Show last n tx (max 5)
+• /import <privateKey> — Import a wallet
+• /address — Show your wallet address
+• /lasttx [n] — Show last n transactions (max 5)
 
-Text shortcuts
-• Send a token address (mint) to get Buy/Snipe options
-• quote <mint> <sol_amount> — Get a price quote
-• buy <mint> <sol_amount> — Quick buy
-• snipe <mint> <sol_amount> — Start an LP-add snipe
+Safety and performance
+• Risk checks: honeypot, mint authority, locker (when available)
+• Fast swaps via raced RPC reads and private relay fallbacks
 
-Settings
-• fee <lamports> — Set priority fee
-• jito on/off — Toggle Jito bundling
-• tier — View your tier and limits
-
-Copy Trade tips
-• Supports fixed SOL amounts or percent-of-balance
-• Enforce per-trade and daily caps to manage risk
-• Sells can be auto-sized and capped by grid rules
-
-Safety
-• We attempt honeypot/mint-authority/locker checks where possible
-• Routes are validated and can fall back to private relays to reduce MEV
-
-Need more?
-• Open Automation for Pump.fun and more alerts
-• Use Suggestions to send feedback or request features
-
-For support, reply here and we’ll follow up.`;
-        await bot.sendMessage(chatId, helpText, { parse_mode: "Markdown" });
+Need help?
+• Reply here and we’ll follow up.`;
+        await bot.sendMessage(chatId, helpText);
       } catch (e) {
         await bot.sendMessage(chatId, `Help failed: ${e?.message || e}`);
       }
@@ -3210,8 +3206,12 @@ For support, reply here and we’ll follow up.`;
       if (state.pendingInput?.type === "QUICK_BUY_AMOUNT") {
         try {
           const { tokenAddress } = state.pendingInput;
-          const amountSol =
-            parseFloat(text.trim()) || (state.defaultBuySol ?? 0.05);
+          const parts = String(text).trim().split(/\s+/);
+          const parsedAmount = parseFloat(parts[0]);
+          const amountSol = Number.isFinite(parsedAmount)
+            ? parsedAmount
+            : (state.defaultBuySol ?? 0.05);
+          const flags = parseFlags(parts.slice(1));
           try {
             const s = getUserState(chatId);
             s.lastAmounts = s.lastAmounts || {};
@@ -3274,38 +3274,64 @@ For support, reply here and we’ll follow up.`;
               setPendingInput(chatId, null);
               return;
             }
-            const priorityFeeLamports = getPriorityFeeLamports();
-            const useJitoBundle = getUseJitoBundle();
+            const priorityFeeLamports =
+              flags.priorityFeeLamports ?? getPriorityFeeLamports();
+            const useJitoBundle = flags.useJitoBundle ?? getUseJitoBundle();
             await bot.sendMessage(
               chatId,
               `⏳ Placing buy ${amountSol} SOL into ${tokenAddress}...`
             );
-            swapPromise = performSwap({
-              inputMint: "So11111111111111111111111111111111111111112",
-              outputMint: tokenAddress,
-              amountSol,
-              priorityFeeLamports,
-              useJitoBundle,
-              chatId,
-            });
+            if (flags.splitAcrossWallets) {
+              const wallets = await getAllUserWalletKeypairs(chatId);
+              const desired = flags.walletsCount || wallets.length || 1;
+              const count = Math.max(1, Math.min(desired, wallets.length || 1));
+              const perWallet = amountSol / count;
+              const tasks = wallets.slice(0, count).map((w) =>
+                performSwap({
+                  inputMint: "So11111111111111111111111111111111111111112",
+                  outputMint: tokenAddress,
+                  amountSol: perWallet,
+                  priorityFeeLamports,
+                  useJitoBundle,
+                  chatId,
+                  walletOverride: w.keypair,
+                })
+              );
+              swapPromise = Promise.all(tasks);
+            } else {
+              swapPromise = performSwap({
+                inputMint: "So11111111111111111111111111111111111111112",
+                outputMint: tokenAddress,
+                amountSol,
+                priorityFeeLamports,
+                useJitoBundle,
+                chatId,
+              });
+            }
             const TIMEOUT_MS = Number(process.env.SWAP_TIMEOUT_MS || 18000);
             await promiseWithTimeout(swapPromise, TIMEOUT_MS, "swap_timeout");
             const swapRes = await swapPromise;
             setPendingInput(chatId, null);
-            const txid =
-              swapRes?.txid ||
-              (Array.isArray(swapRes?.txids) ? swapRes.txids[0] : null);
+            let txid = swapRes?.txid || null;
+            if (!txid && Array.isArray(swapRes)) {
+              txid = swapRes.map((r) => r?.txid).filter(Boolean)[0] || null;
+            } else if (!txid && Array.isArray(swapRes?.txids)) {
+              txid = swapRes.txids[0] || null;
+            }
             if (!txid) throw new Error("Swap succeeded but no txid returned");
             const solscan = `https://solscan.io/tx/${txid}`;
-            const symbol = swapRes?.output?.symbol || "TOKEN";
-            const tokOut =
-              typeof swapRes?.output?.tokensOut === "number"
-                ? swapRes.output.tokensOut.toFixed(4)
-                : "?";
-            const impact =
-              swapRes?.route?.priceImpactPct != null
-                ? `${swapRes.route.priceImpactPct}%`
-                : "?";
+            const symbol = Array.isArray(swapRes)
+              ? (swapRes[0]?.output?.symbol || "TOKEN")
+              : (swapRes?.output?.symbol || "TOKEN");
+            const totalOut = Array.isArray(swapRes)
+              ? swapRes.reduce((acc, r) => acc + (Number(r?.output?.tokensOut) || 0), 0)
+              : (Number(swapRes?.output?.tokensOut) || 0);
+            const tokOut = totalOut ? totalOut.toFixed(4) : "?";
+            const impact = Array.isArray(swapRes)
+              ? "(split across wallets)"
+              : (swapRes?.route?.priceImpactPct != null
+                  ? `${swapRes.route.priceImpactPct}%`
+                  : "?");
             await bot.sendMessage(
               chatId,
               `✅ Buy sent\n• Token: ${symbol} (${tokenAddress})\n• Amount: ${amountSol} SOL\n• Est. Tokens: ${tokOut}\n• Route: ${
@@ -3323,7 +3349,9 @@ For support, reply here and we’ll follow up.`;
               kind: "buy",
               mint: tokenAddress,
               sol: Number(amountSol),
-              tokens: Number(swapRes?.output?.tokensOut ?? NaN),
+              tokens: Array.isArray(swapRes)
+                ? swapRes.reduce((acc, r) => acc + (Number(r?.output?.tokensOut) || 0), 0)
+                : Number(swapRes?.output?.tokensOut ?? NaN),
               route: swapRes?.route?.labels,
               priceImpactPct: swapRes?.route?.priceImpactPct ?? null,
               slippageBps: swapRes?.slippageBps,

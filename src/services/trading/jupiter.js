@@ -198,11 +198,12 @@ export async function performSwap({
   priorityFeeLamports,
   useJitoBundle,
   slippageBps: slippageBpsOverride,
+  walletOverride,
 }) {
   if (!Number.isFinite(Number(amountSol)) || Number(amountSol) <= 0)
     throw new Error("invalid_amount");
   const connection = getRpcConnection();
-  const wallet = await getUserWalletInstance(chatId);
+  const wallet = walletOverride || (await getUserWalletInstance(chatId));
   const slippageBps = Number.isFinite(Number(slippageBpsOverride))
     ? Number(slippageBpsOverride)
     : await getAdaptiveSlippageBps().catch(() =>
