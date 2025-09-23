@@ -54,6 +54,7 @@ import {
   buildFeeSettingsMenu,
   buildCopyTradeMenu,
   buildCopyTradeWalletMenu,
+  buildWalletStatusHeader,
 } from "./menuBuilder.js";
 import {
   getUserState,
@@ -621,6 +622,26 @@ export async function startTelegramBot() {
 
       case data === "WALLETS_MENU": {
         await openWalletsMenu();
+        return;
+      }
+
+      // Handle clicking on a wallet row: set active and show details with funds
+      case data.startsWith("WALLET_"): {
+        const walletId = data.replace("WALLET_", "");
+        try {
+          await setActiveWallet(chatId, walletId);
+          const header = await buildWalletStatusHeader(chatId);
+          const details = await buildWalletDetailsMenu(chatId, walletId);
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Active wallet set" });
+          } catch {}
+          const ok = await safeEditText(`💼 Wallet\n${header}`, details.reply_markup);
+          if (!ok) {
+            await bot.sendMessage(chatId, `💼 Wallet\n${header}`, { reply_markup: details.reply_markup });
+          }
+        } catch (e) {
+          await bot.sendMessage(chatId, `Failed to open wallet: ${e?.message || e}`);
+        }
         return;
       }
 
@@ -2302,32 +2323,22 @@ export async function startTelegramBot() {
         return;
       }
 
-      if (data.startsWith("WALLET_DETAILS_")) {
+      if (data.startsWith("WALLET_")) {
+        const walletId = data.replace("WALLET_", "");
         try {
-          await bot.answerCallbackQuery(query.id, { text: "Wallet details" });
-        } catch {}
-        const walletId = data.replace("WALLET_DETAILS_", "");
-        try {
+          await setActiveWallet(chatId, walletId);
+          const header = await buildWalletStatusHeader(chatId);
           const details = await buildWalletDetailsMenu(chatId, walletId);
-          await bot.editMessageText("💼 Wallet Details", {
+          try {
+            await bot.answerCallbackQuery(query.id, { text: "Active wallet set" });
+          } catch {}
+          await bot.editMessageText(`💼 Wallet\n${header}`, {
             chat_id: chatId,
             message_id: messageId,
             reply_markup: details.reply_markup,
           });
         } catch (e) {
-          try {
-            const details = await buildWalletDetailsMenu(chatId, walletId);
-            await bot.sendMessage(chatId, "💼 Wallet Details", {
-              reply_markup: details.reply_markup,
-            });
-          } catch (_) {
-            await bot.sendMessage(
-              chatId,
-              `Failed to open wallet details: ${(e?.message || e)
-                .toString()
-                .slice(0, 200)}`
-            );
-          }
+          await bot.sendMessage(chatId, `Failed to open wallet: ${e?.message || e}`);
         }
         return;
       }
