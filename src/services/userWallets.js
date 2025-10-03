@@ -40,7 +40,10 @@ function encrypt(plaintext) {
   }
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv("aes-256-cbc", key, iv);
-  const enc = Buffer.concat([cipher.update(Buffer.from(plaintext, "utf8")), cipher.final()]);
+  const enc = Buffer.concat([
+    cipher.update(Buffer.from(plaintext, "utf8")),
+    cipher.final(),
+  ]);
   return iv.toString("hex") + ":" + enc.toString("hex");
 }
 
@@ -68,14 +71,22 @@ function decrypt(ciphertext) {
 // Helpers
 async function getDbWallets(chatId) {
   if (!walletsCol) return null;
-  const docs = await walletsCol.find({ chatId: chatId.toString(), deletedAt: { $exists: false } }).toArray();
+  const docs = await walletsCol
+    .find({ chatId: chatId.toString(), deletedAt: { $exists: false } })
+    .toArray();
   return docs;
 }
 
 async function setActiveInDb(chatId, walletId) {
   if (!walletsCol) return;
-  await walletsCol.updateMany({ chatId: chatId.toString(), active: true }, { $set: { active: false } });
-  await walletsCol.updateOne({ _id: new ObjectId(walletId) }, { $set: { active: true } });
+  await walletsCol.updateMany(
+    { chatId: chatId.toString(), active: true },
+    { $set: { active: false } }
+  );
+  await walletsCol.updateOne(
+    { _id: new ObjectId(walletId) },
+    { $set: { active: true } }
+  );
 }
 
 export async function createUserWallet(chatId, name = "Wallet 1") {
@@ -91,12 +102,19 @@ export async function createUserWallet(chatId, name = "Wallet 1") {
       publicKey: keypair.publicKey.toBase58(),
       createdAt: new Date(),
       imported: false,
-      active: true
+      active: true,
     };
     // make others inactive
-    await walletsCol.updateMany({ chatId: chatId.toString(), active: true }, { $set: { active: false } });
+    await walletsCol.updateMany(
+      { chatId: chatId.toString(), active: true },
+      { $set: { active: false } }
+    );
     const res = await walletsCol.insertOne(doc);
-    return { id: res.insertedId.toString(), publicKey: doc.publicKey, privateKey: privateKeyBase58 };
+    return {
+      id: res.insertedId.toString(),
+      publicKey: doc.publicKey,
+      privateKey: privateKeyBase58,
+    };
   }
 
   // Fallback in-memory (single wallet)
@@ -105,18 +123,28 @@ export async function createUserWallet(chatId, name = "Wallet 1") {
     publicKey: keypair.publicKey.toBase58(),
     createdAt: new Date(),
     name,
-    active: true
+    active: true,
   });
-  return { publicKey: keypair.publicKey.toBase58(), privateKey: privateKeyBase58 };
+  return {
+    publicKey: keypair.publicKey.toBase58(),
+    privateKey: privateKeyBase58,
+  };
 }
 
-export async function importUserWallet(chatId, privateKeyBase58, name = "Imported") {
+export async function importUserWallet(
+  chatId,
+  privateKeyBase58,
+  name = "Imported"
+) {
   try {
     const keypair = Keypair.fromSecretKey(bs58.decode(privateKeyBase58));
     const encryptedPrivateKey = encrypt(privateKeyBase58);
 
     if (walletsCol) {
-      await walletsCol.updateMany({ chatId: chatId.toString(), active: true }, { $set: { active: false } });
+      await walletsCol.updateMany(
+        { chatId: chatId.toString(), active: true },
+        { $set: { active: false } }
+      );
       const doc = {
         chatId: chatId.toString(),
         name,
@@ -124,7 +152,7 @@ export async function importUserWallet(chatId, privateKeyBase58, name = "Importe
         publicKey: keypair.publicKey.toBase58(),
         createdAt: new Date(),
         imported: true,
-        active: true
+        active: true,
       };
       const res = await walletsCol.insertOne(doc);
       return keypair.publicKey.toBase58();
@@ -136,7 +164,7 @@ export async function importUserWallet(chatId, privateKeyBase58, name = "Importe
       createdAt: new Date(),
       name,
       imported: true,
-      active: true
+      active: true,
     });
     return keypair.publicKey.toBase58();
   } catch (error) {
@@ -147,11 +175,23 @@ export async function importUserWallet(chatId, privateKeyBase58, name = "Importe
 export async function listUserWallets(chatId) {
   if (walletsCol) {
     const docs = await getDbWallets(chatId);
-    return docs.map(d => ({ id: d._id.toString(), name: d.name, publicKey: d.publicKey, active: !!d.active }));
+    return docs.map((d) => ({
+      id: d._id.toString(),
+      name: d.name,
+      publicKey: d.publicKey,
+      active: !!d.active,
+    }));
   }
   const entry = userWallets.get(chatId.toString());
   if (!entry) return [];
-  return [{ id: 'memory', name: entry.name || 'Wallet', publicKey: entry.publicKey, active: true }];
+  return [
+    {
+      id: "memory",
+      name: entry.name || "Wallet",
+      publicKey: entry.publicKey,
+      active: true,
+    },
+  ];
 }
 
 export async function setActiveWallet(chatId, walletId) {
@@ -164,7 +204,10 @@ export async function setActiveWallet(chatId, walletId) {
 
 export async function renameUserWallet(chatId, walletId, newName) {
   if (walletsCol) {
-    await walletsCol.updateOne({ _id: new ObjectId(walletId), chatId: chatId.toString() }, { $set: { name: newName } });
+    await walletsCol.updateOne(
+      { _id: new ObjectId(walletId), chatId: chatId.toString() },
+      { $set: { name: newName } }
+    );
     return;
   }
   const entry = userWallets.get(chatId.toString());
@@ -173,7 +216,10 @@ export async function renameUserWallet(chatId, walletId, newName) {
 
 export async function hasUserWallet(chatId) {
   if (walletsCol) {
-    const count = await walletsCol.countDocuments({ chatId: chatId.toString(), deletedAt: { $exists: false } });
+    const count = await walletsCol.countDocuments({
+      chatId: chatId.toString(),
+      deletedAt: { $exists: false },
+    });
     return count > 0;
   }
   return userWallets.has(chatId.toString());
@@ -182,8 +228,9 @@ export async function hasUserWallet(chatId) {
 export async function getUserWallet(chatId) {
   if (walletsCol) {
     const docs = await getDbWallets(chatId);
-    if (!docs || docs.length === 0) throw new Error("User wallet not found. Use /setup to create a wallet.");
-    const active = docs.find(d => d.active) || docs[0];
+    if (!docs || docs.length === 0)
+      throw new Error("User wallet not found. Use /setup to create a wallet.");
+    const active = docs.find((d) => d.active) || docs[0];
     const decryptedPrivateKey = decrypt(active.encryptedPrivateKey);
     const keypair = Keypair.fromSecretKey(bs58.decode(decryptedPrivateKey));
     return keypair;
@@ -205,7 +252,7 @@ export async function getUserWallet(chatId) {
 export async function getUserPublicKey(chatId) {
   if (walletsCol) {
     const docs = await getDbWallets(chatId);
-    const active = docs?.find(d => d.active) || docs?.[0];
+    const active = docs?.find((d) => d.active) || docs?.[0];
     return active?.publicKey || null;
   }
   const walletData = userWallets.get(chatId.toString());
@@ -214,7 +261,8 @@ export async function getUserPublicKey(chatId) {
 
 export function getUserConnection(chatId) {
   if (!userConnections.has(chatId.toString())) {
-    const rpcUrl = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
+    const rpcUrl =
+      process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
     userConnections.set(chatId.toString(), new Connection(rpcUrl, "confirmed"));
   }
   return userConnections.get(chatId.toString());
@@ -228,7 +276,13 @@ export async function getAllUserWalletKeypairs(chatId) {
     return docs.map((d) => {
       const dec = decrypt(d.encryptedPrivateKey);
       const kp = Keypair.fromSecretKey(bs58.decode(dec));
-      return { id: d._id.toString(), name: d.name, publicKey: d.publicKey, keypair: kp, active: !!d.active };
+      return {
+        id: d._id.toString(),
+        name: d.name,
+        publicKey: d.publicKey,
+        keypair: kp,
+        active: !!d.active,
+      };
     });
   }
   const entry = userWallets.get(chatId.toString());
@@ -236,7 +290,15 @@ export async function getAllUserWalletKeypairs(chatId) {
   try {
     const dec = decrypt(entry.encryptedPrivateKey);
     const kp = Keypair.fromSecretKey(bs58.decode(dec));
-    return [{ id: 'memory', name: entry.name || 'Wallet', publicKey: entry.publicKey, keypair: kp, active: true }];
+    return [
+      {
+        id: "memory",
+        name: entry.name || "Wallet",
+        publicKey: entry.publicKey,
+        keypair: kp,
+        active: true,
+      },
+    ];
   } catch (e) {
     return [];
   }
@@ -246,21 +308,30 @@ export async function getAllUserWalletKeypairs(chatId) {
 export async function getUserWalletKeypairById(chatId, walletId) {
   if (walletsCol) {
     const docs = await getDbWallets(chatId);
-    const d = docs?.find(x => x._id.toString() === walletId);
+    const d = docs?.find((x) => x._id.toString() === walletId);
     if (!d) return null;
     const dec = decrypt(d.encryptedPrivateKey);
     const kp = Keypair.fromSecretKey(bs58.decode(dec));
-    return { id: d._id.toString(), name: d.name, publicKey: d.publicKey, keypair: kp, active: !!d.active };
+    return {
+      id: d._id.toString(),
+      name: d.name,
+      publicKey: d.publicKey,
+      keypair: kp,
+      active: !!d.active,
+    };
   }
   const list = await getAllUserWalletKeypairs(chatId);
-  return list.find(x => x.id === walletId) || null;
+  return list.find((x) => x.id === walletId) || null;
 }
 
 export function deleteUserWallet(chatId) {
   userConnections.delete(chatId.toString());
   if (walletsCol) {
     // Soft delete all wallets for chat
-    return walletsCol.updateMany({ chatId: chatId.toString() }, { $set: { deletedAt: new Date(), active: false } });
+    return walletsCol.updateMany(
+      { chatId: chatId.toString() },
+      { $set: { deletedAt: new Date(), active: false } }
+    );
   }
   userWallets.delete(chatId.toString());
 }

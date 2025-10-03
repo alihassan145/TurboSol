@@ -180,11 +180,13 @@ async function buildTurboSolWelcomeMessage(chatId) {
       fractionalSecondDigits: 3,
     });
 
-    const solNum = typeof info.sol === "number" ? info.sol : parseFloat(info.solBalance);
+    const solNum =
+      typeof info.sol === "number" ? info.sol : parseFloat(info.solBalance);
     const solText = Number.isFinite(solNum) ? solNum.toFixed(4) : "?";
-    const balanceStatus = Number.isFinite(solNum) && solNum > 0
-      ? "🟢 Your wallet is funded and ready for trading!"
-      : "🔴 You currently have no SOL in your wallet.\nTo start trading, please deposit SOL to your address.";
+    const balanceStatus =
+      Number.isFinite(solNum) && solNum > 0
+        ? "🟢 Your wallet is funded and ready for trading!"
+        : "🔴 You currently have no SOL in your wallet.\nTo start trading, please deposit SOL to your address.";
 
     return `🚀 Welcome to TurboSol!\n\nYour Solana Wallet:\n\n→ W1: ${info.address}\nBalance: ${solText} SOL (USD $${info.usdBalance})\n\n${balanceStatus}\n\n🕒 Last updated: ${timestamp}`;
   }
@@ -634,14 +636,24 @@ export async function startTelegramBot() {
           const header = await buildWalletStatusHeader(chatId);
           const details = await buildWalletDetailsMenu(chatId, walletId);
           try {
-            await bot.answerCallbackQuery(query.id, { text: "Active wallet set" });
+            await bot.answerCallbackQuery(query.id, {
+              text: "Active wallet set",
+            });
           } catch {}
-          const ok = await safeEditText(`💼 Wallet\n${header}`, details.reply_markup);
+          const ok = await safeEditText(
+            `💼 Wallet\n${header}`,
+            details.reply_markup
+          );
           if (!ok) {
-            await bot.sendMessage(chatId, `💼 Wallet\n${header}`, { reply_markup: details.reply_markup });
+            await bot.sendMessage(chatId, `💼 Wallet\n${header}`, {
+              reply_markup: details.reply_markup,
+            });
           }
         } catch (e) {
-          await bot.sendMessage(chatId, `Failed to open wallet: ${e?.message || e}`);
+          await bot.sendMessage(
+            chatId,
+            `Failed to open wallet: ${e?.message || e}`
+          );
         }
         return;
       }
@@ -656,7 +668,9 @@ export async function startTelegramBot() {
         } catch (e) {
           const msg = e?.message || String(e);
           try {
-            await bot.answerCallbackQuery(query.id, { text: msg.slice(0, 200) });
+            await bot.answerCallbackQuery(query.id, {
+              text: msg.slice(0, 200),
+            });
           } catch {}
           await bot.sendMessage(chatId, `Create wallet failed: ${msg}`);
         }
@@ -673,7 +687,9 @@ export async function startTelegramBot() {
       case data === "IMPORT_WALLET": {
         setPendingInput(chatId, { type: "IMPORT_WALLET" });
         try {
-          await bot.answerCallbackQuery(query.id, { text: "Awaiting private key…" });
+          await bot.answerCallbackQuery(query.id, {
+            text: "Awaiting private key…",
+          });
         } catch {}
         await bot.sendMessage(
           chatId,
@@ -1597,12 +1613,12 @@ export async function startTelegramBot() {
           inline_keyboard: [
             [
               { text: "How to use", callback_data: "HELP_TAB_HOWTO" },
-              { text: "Help", callback_data: "HELP_TAB_HELP" },
+              { text: "Help all", callback_data: "HELP_TAB_HELP" },
             ],
             [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
           ],
         };
-        await bot.sendMessage(chatId, howTo, { reply_markup: keyboard });
+        await bot.sendMessage(chatId, help, { reply_markup: keyboard });
       } catch (e) {
         await bot.sendMessage(chatId, `Help failed: ${e?.message || e}`);
       }
@@ -1619,7 +1635,7 @@ export async function startTelegramBot() {
           inline_keyboard: [
             [
               { text: "How to use", callback_data: "HELP_TAB_HOWTO" },
-              { text: "Help", callback_data: "HELP_TAB_HELP" },
+              { text: "Help all", callback_data: "HELP_TAB_HELP" },
             ],
             [{ text: "🏠 Main", callback_data: "MAIN_MENU" }],
           ],
@@ -2331,7 +2347,9 @@ export async function startTelegramBot() {
           const header = await buildWalletStatusHeader(chatId);
           const details = await buildWalletDetailsMenu(chatId, walletId);
           try {
-            await bot.answerCallbackQuery(query.id, { text: "Active wallet set" });
+            await bot.answerCallbackQuery(query.id, {
+              text: "Active wallet set",
+            });
           } catch {}
           await bot.editMessageText(`💼 Wallet\n${header}`, {
             chat_id: chatId,
@@ -2339,7 +2357,10 @@ export async function startTelegramBot() {
             reply_markup: details.reply_markup,
           });
         } catch (e) {
-          await bot.sendMessage(chatId, `Failed to open wallet: ${e?.message || e}`);
+          await bot.sendMessage(
+            chatId,
+            `Failed to open wallet: ${e?.message || e}`
+          );
         }
         return;
       }

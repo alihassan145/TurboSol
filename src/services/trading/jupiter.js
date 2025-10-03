@@ -10,8 +10,8 @@ import { simulateBundleAndSend } from "../jito.js";
 import { getAdaptiveSlippageBps, recordSlippageFeedback } from "../slippage.js";
 
 export const NATIVE_SOL = "So11111111111111111111111111111111111111112";
-const JUP_QUOTE_URL = "https://quote-api.jup.ag/v6/quote";
-const JUP_SWAP_URL = "https://quote-api.jup.ag/v6/swap";
+const JUP_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote";
+const JUP_SWAP_URL = "https://lite-api.jup.ag/swap/v1/swap";
 
 const mintDecimalsCache = new Map();
 
@@ -90,7 +90,29 @@ export async function getQuoteRaw({
       errorMessage: data.error || "",
     };
   }
-  return res.data || null;
+  
+  const responseData = res.data;
+  
+  // Validate response structure
+  if (!responseData || typeof responseData !== 'object') {
+    return null;
+  }
+  
+  // Check if response contains an error
+  if (responseData.error || responseData.errorCode) {
+    return {
+      __error__: true,
+      errorCode: responseData.errorCode || 'API_ERROR',
+      errorMessage: responseData.error || 'Unknown API error',
+    };
+  }
+  
+  // Check if response has essential fields for a valid quote
+  if (!responseData.outAmount || !responseData.routePlan) {
+    return null;
+  }
+  
+  return responseData;
 }
 
 export async function getTokenQuote({
@@ -109,6 +131,7 @@ export async function getTokenQuote({
   );
 
   const tryGet = async (bps, tmo, direct = false, amt = amountRaw) => {
+    console.log(`[QUOTE] Attempting quote with slippage: ${bps}bps, timeout: ${tmo}ms, direct: ${direct}, amount: ${amt}`);
     let r = await getQuoteRaw({
       inputMint,
       outputMint,
@@ -116,20 +139,33 @@ export async function getTokenQuote({
       slippageBps: bps,
       timeoutMs: tmo,
       onlyDirectRoutes: direct,
-    }).catch(() => null);
+    }).catch((err) => {
+      console.log(`[QUOTE] Error in getQuoteRaw:`, err.message);
+      return null;
+    });
+    
     if (r && r.__error__) {
+      console.log(`[QUOTE] API returned error:`, r.errorCode, r.errorMessage);
       // Avoid throwing here; callers expect null on failure
       r = null;
+    } else if (r) {
+      console.log(`[QUOTE] Success! outAmount: ${r.outAmount}, priceImpact: ${r.priceImpactPct}%`);
+    } else {
+      console.log(`[QUOTE] No route found`);
     }
+    
     return r;
   };
 
   let route = await tryGet(slippageBps, baseTimeout);
+  console.log(`[QUOTE] Final route result:`, route ? `Found route with outAmount: ${route.outAmount}` : 'No route found');
+
   if (!route) route = await tryGet(slippageBps, fallbackTimeout);
   if (!route && fallbackSlippageBps > slippageBps)
     route = await tryGet(fallbackSlippageBps, fallbackTimeout);
   if (!route) route = await tryGet(fallbackSlippageBps, fallbackTimeout, true);
   if (!route) {
+    console.log(`[QUOTE] Probing larger amounts for liquidity detection...`);
     // Probe larger amounts quietly to detect liquidity thresholds, but don't throw
     for (const mult of [1.5, 2.0]) {
       const probe = Math.max(1, Math.floor(amountRaw * mult));
@@ -140,13 +176,17 @@ export async function getTokenQuote({
         probe
       );
       if (rProbe) {
+        console.log(`[QUOTE] Found route with larger amount (${mult}x), but returning null to maintain UX`);
         // We found a route with a higher amount, but to keep existing UX, just return null and let UI handle amount input
         break;
       }
     }
   }
 
-  if (!route) return null;
+  if (!route) {
+    console.log(`[QUOTE] No route found after all attempts`);
+    return null;
+  }
 
   // Shape response expected by telegram.js
   const connection = getRpcConnection();
@@ -174,7 +214,12 @@ async function buildAndSignSwapTx({
     userPublicKey: userPk,
     wrapAndUnwrapSol: true,
     dynamicComputeUnitLimit: true,
-    prioritizationFeeLamports: priorityFeeLamports ?? "auto",
+    prioritizationFeeLamports: {
+      priorityLevelWithMaxLamports: {
+        maxLamports: priorityFeeLamports ?? 10000000,
+        priorityLevel: "veryHigh"
+      }
+    }
   };
   const res = await axios.post(JUP_SWAP_URL, body, {
     timeout: Number(process.env.SWAP_BUILD_TIMEOUT_MS || 5000),

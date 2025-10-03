@@ -37,7 +37,12 @@ function keyForAlarm(mint, provider, unlockAt, kind) {
   return `${mint}|${provider}|${unlockAt}|${kind}`;
 }
 
-function scheduleUnlockAlarms({ mint, provider, unlockAt, preAlertHours = Number(process.env.LP_UNLOCK_PREALERT_HOURS || 6) }) {
+function scheduleUnlockAlarms({
+  mint,
+  provider,
+  unlockAt,
+  preAlertHours = Number(process.env.LP_UNLOCK_PREALERT_HOURS || 6),
+}) {
   if (!unlockAt || Number.isNaN(unlockAt)) return;
   const now = Date.now();
   const preAt = unlockAt - preAlertHours * 3600_000;
@@ -57,7 +62,11 @@ function scheduleUnlockAlarms({ mint, provider, unlockAt, preAlertHours = Number
         lpUnlockTimers.delete(k);
       });
       lpUnlockTimers.set(k, tid);
-      console.log(`⏰ Scheduled LP pre-alert (${provider}) for ${mint} at ${new Date(preAt).toISOString()}`);
+      console.log(
+        `⏰ Scheduled LP pre-alert (${provider}) for ${mint} at ${new Date(
+          preAt
+        ).toISOString()}`
+      );
     }
   }
 
@@ -76,7 +85,11 @@ function scheduleUnlockAlarms({ mint, provider, unlockAt, preAlertHours = Number
         lpUnlockTimers.delete(k2);
       });
       lpUnlockTimers.set(k2, tid2);
-      console.log(`🔓 Scheduled LP unlock alarm (${provider}) for ${mint} at ${new Date(unlockAt).toISOString()}`);
+      console.log(
+        `🔓 Scheduled LP unlock alarm (${provider}) for ${mint} at ${new Date(
+          unlockAt
+        ).toISOString()}`
+      );
     }
   }
 }
@@ -85,13 +98,102 @@ function scheduleUnlockAlarms({ mint, provider, unlockAt, preAlertHours = Number
 // Provider helpers
 // ------------------------------
 async function queryRugcheck(mint, timeoutMs) {
-  const url = `https://api.rugcheck.xyz/api/v1/tokens/${mint}`;
-  const { data } = await axios.get(url, { timeout: timeoutMs });
+  const base = (
+    process.env.RUGCHECK_API_BASE || "https://api.rugcheck.xyz/api/v1"
+  ).replace(/\/$/, "");
+  let summary = null;
+  let report = null;
+  let vault = null;
+  let anySuccess = false;
+  let lastError = null;
+  // Try simple token summary
+  try {
+    const { data } = await axios.get(`${base}/tokens/${mint}`, {
+      timeout: timeoutMs,
+    });
+    summary = data;
+    anySuccess = true;
+  } catch (e) {
+    lastError = e;
+  }
+  // Try full report for richer risk metadata
+  try {
+    const { data } = await axios.get(`${base}/tokens/${mint}/report`, {
+      timeout: timeoutMs,
+    });
+    report = data;
+    anySuccess = true;
+  } catch (e) {
+    lastError = e;
+  }
+  // Try vault information to assess LP lockers/unlock schedule
+  try {
+    const { data } = await axios.get(`${base}/tokens/${mint}/vault`, {
+      timeout: timeoutMs,
+    });
+    vault = data;
+    anySuccess = true;
+  } catch (e) {
+    lastError = e;
+  }
+
+  if (!anySuccess) {
+    const err = new Error(
+      `rugcheck_unavailable: ${lastError?.message || "unknown error"}`
+    );
+    err.code = "RUGCHECK_UNAVAILABLE";
+    throw err;
+  }
+
+  const data = summary || report || {};
+
+  // Honeypot/cannot sell detection
+  let honeypot = Boolean(data?.is_honeypot || data?.honeypot?.is);
+  if (!honeypot && Array.isArray(data?.risks)) {
+    honeypot = data.risks.some((r) => {
+      const n = String(r?.name || "").toLowerCase();
+      const d = String(r?.description || "").toLowerCase();
+      return (
+        n.includes("honeypot") ||
+        d.includes("honeypot") ||
+        n.includes("cannot sell") ||
+        d.includes("cannot sell")
+      );
+    });
+  }
+
+  // Taxes: prefer explicit buy/sell; fallback to transfer fee pct if present
+  let buyTax = Number(data?.buyTax ?? data?.taxes?.buy ?? NaN);
+  let sellTax = Number(data?.sellTax ?? data?.taxes?.sell ?? NaN);
+  if (Number.isNaN(buyTax) && data?.transferFee?.pct != null)
+    buyTax = Number(data.transferFee.pct);
+  if (Number.isNaN(sellTax) && data?.transferFee?.pct != null)
+    sellTax = Number(data.transferFee.pct);
+
+  // LP lock inference: summary/report first, then vault total pct
+  let lpLocked = Boolean(data?.lp?.locked ?? data?.lpLocked);
+  if (!lpLocked && vault?.total?.pct != null) {
+    lpLocked = Number(vault.total.pct) > 0;
+  }
+
+  // Schedule LP unlock alarms when available (from vault lockers)
+  if (vault && vault.lockers) {
+    const unlockAt = findEarliestUnlockFromObject(vault.lockers);
+    if (unlockAt) {
+      scheduleUnlockAlarms({
+        mint,
+        provider: "vault",
+        unlockAt,
+        preAlertHours: Number(process.env.LP_UNLOCK_PREALERT_HOURS || 6),
+      });
+    }
+  }
+
   return {
-    honeypot: Boolean(data?.is_honeypot || data?.honeypot?.is),
-    buyTax: Number(data?.buyTax ?? data?.taxes?.buy ?? 0),
-    sellTax: Number(data?.sellTax ?? data?.taxes?.sell ?? 0),
-    lpLocked: Boolean(data?.lp?.locked ?? data?.lpLocked),
+    honeypot: Boolean(honeypot),
+    buyTax: Number.isFinite(buyTax) ? buyTax : 0,
+    sellTax: Number.isFinite(sellTax) ? sellTax : 0,
+    lpLocked: Boolean(lpLocked),
   };
 }
 
@@ -175,10 +277,15 @@ function inferLockedFromObject(obj) {
     if (cur && typeof cur === "object") {
       for (const [k, v] of Object.entries(cur)) {
         const key = k.toLowerCase();
-        if (key.includes("locked") || key.includes("islocked") || key.includes("lp_locked")) {
+        if (
+          key.includes("locked") ||
+          key.includes("islocked") ||
+          key.includes("lp_locked")
+        ) {
           if (typeof v === "boolean") return v;
           if (typeof v === "number") result = Boolean(v);
-          if (typeof v === "string") result = v.toLowerCase() === "true" || v === "1";
+          if (typeof v === "string")
+            result = v.toLowerCase() === "true" || v === "1";
         }
         if (v && typeof v === "object") stack.push(v);
       }
@@ -187,7 +294,14 @@ function inferLockedFromObject(obj) {
   return result;
 }
 
-async function queryLockerGeneric(name, baseEnv, keyEnv, mint, timeoutMs, path = "/locks") {
+async function queryLockerGeneric(
+  name,
+  baseEnv,
+  keyEnv,
+  mint,
+  timeoutMs,
+  path = "/locks"
+) {
   const base = process.env[baseEnv];
   if (!base) return null;
   const key = process.env[keyEnv];
@@ -200,16 +314,40 @@ async function queryLockerGeneric(name, baseEnv, keyEnv, mint, timeoutMs, path =
 }
 
 async function queryUnicrypt(mint, timeoutMs) {
-  return queryLockerGeneric("unicrypt", "UNICRYPT_API_BASE", "UNICRYPT_API_KEY", mint, timeoutMs);
+  return queryLockerGeneric(
+    "unicrypt",
+    "UNICRYPT_API_BASE",
+    "UNICRYPT_API_KEY",
+    mint,
+    timeoutMs
+  );
 }
 async function queryPinkLock(mint, timeoutMs) {
-  return queryLockerGeneric("pinklock", "PINKLOCK_API_BASE", "PINKLOCK_API_KEY", mint, timeoutMs);
+  return queryLockerGeneric(
+    "pinklock",
+    "PINKLOCK_API_BASE",
+    "PINKLOCK_API_KEY",
+    mint,
+    timeoutMs
+  );
 }
 async function queryTeamFinance(mint, timeoutMs) {
-  return queryLockerGeneric("teamfinance", "TEAMFINANCE_API_BASE", "TEAMFINANCE_API_KEY", mint, timeoutMs);
+  return queryLockerGeneric(
+    "teamfinance",
+    "TEAMFINANCE_API_BASE",
+    "TEAMFINANCE_API_KEY",
+    mint,
+    timeoutMs
+  );
 }
 async function queryUncx(mint, timeoutMs) {
-  return queryLockerGeneric("uncx", "UNCX_API_BASE", "UNCX_API_KEY", mint, timeoutMs);
+  return queryLockerGeneric(
+    "uncx",
+    "UNCX_API_BASE",
+    "UNCX_API_KEY",
+    mint,
+    timeoutMs
+  );
 }
 
 // On-chain mint authority checks: renounced mint/freeze?
@@ -218,8 +356,10 @@ async function queryOnchainMint(mint, timeoutMs = 1200) {
   const pk = new PublicKey(mint);
   const p = conn.getParsedAccountInfo(pk).then((resp) => {
     const info = resp?.value?.data?.parsed?.info || {};
-    const hasMintAuthority = info?.mintAuthorityOption === 1 && !!info?.mintAuthority;
-    const hasFreezeAuthority = info?.freezeAuthorityOption === 1 && !!info?.freezeAuthority;
+    const hasMintAuthority =
+      info?.mintAuthorityOption === 1 && !!info?.mintAuthority;
+    const hasFreezeAuthority =
+      info?.freezeAuthorityOption === 1 && !!info?.freezeAuthority;
     return {
       hasMintAuthority,
       hasFreezeAuthority,
@@ -257,7 +397,7 @@ export async function riskCheckToken(
     minLiquidityUsd = Number(process.env.MIN_LIQ_USD || 0),
     maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500),
     maxSellTaxBps = Number(process.env.MAX_SELL_TAX_BPS || 2500),
-    timeoutMs = 1200,
+    timeoutMs = Number(process.env.RUGCHECK_TIMEOUT_MS || 1200),
     cacheMs = DEFAULT_RISK_CACHE_MS,
   } = {}
 ) {
@@ -283,6 +423,7 @@ export async function riskCheckToken(
 
   const lpAlarmsEnabled = truthyEnv("LP_UNLOCK_ALARMS_ENABLED", true);
   const preAlertHours = Number(process.env.LP_UNLOCK_PREALERT_HOURS || 6);
+  const blockOnRugFail = truthyEnv("RUGCHECK_BLOCK_ON_FAILURE", false);
 
   // Concurrently query providers (best effort)
   const tasks = {
@@ -294,10 +435,31 @@ export async function riskCheckToken(
 
   // Optional locker providers (only queried if configured)
   const lockerPromises = [];
-  if (process.env.UNICRYPT_API_BASE) lockerPromises.push(queryUnicrypt(mint, timeoutMs).catch((e) => ({ error: e, locker: "unicrypt" })));
-  if (process.env.PINKLOCK_API_BASE) lockerPromises.push(queryPinkLock(mint, timeoutMs).catch((e) => ({ error: e, locker: "pinklock" })));
-  if (process.env.TEAMFINANCE_API_BASE) lockerPromises.push(queryTeamFinance(mint, timeoutMs).catch((e) => ({ error: e, locker: "teamfinance" })));
-  if (process.env.UNCX_API_BASE) lockerPromises.push(queryUncx(mint, timeoutMs).catch((e) => ({ error: e, locker: "uncx" })));
+  if (process.env.UNICRYPT_API_BASE)
+    lockerPromises.push(
+      queryUnicrypt(mint, timeoutMs).catch((e) => ({
+        error: e,
+        locker: "unicrypt",
+      }))
+    );
+  if (process.env.PINKLOCK_API_BASE)
+    lockerPromises.push(
+      queryPinkLock(mint, timeoutMs).catch((e) => ({
+        error: e,
+        locker: "pinklock",
+      }))
+    );
+  if (process.env.TEAMFINANCE_API_BASE)
+    lockerPromises.push(
+      queryTeamFinance(mint, timeoutMs).catch((e) => ({
+        error: e,
+        locker: "teamfinance",
+      }))
+    );
+  if (process.env.UNCX_API_BASE)
+    lockerPromises.push(
+      queryUncx(mint, timeoutMs).catch((e) => ({ error: e, locker: "uncx" }))
+    );
 
   const [rug, honey, dex, onchain, lockerResults] = await Promise.all([
     tasks.rugcheck,
@@ -308,12 +470,26 @@ export async function riskCheckToken(
   ]);
 
   // Provider errors -> warnings
-  if (rug?.error) warnings.push(`Rugcheck failed: ${rug.error.message || rug.error}`);
-  if (honey?.error) warnings.push(`Honeypot.is failed: ${honey.error.message || honey.error}`);
-  if (dex?.error) warnings.push(`Dexscreener failed: ${dex.error.message || dex.error}`);
-  if (onchain?.error) warnings.push(`On-chain check failed: ${onchain.error.message || onchain.error}`);
+  if (rug?.error) {
+    warnings.push(`Rugcheck failed: ${rug.error.message || rug.error}`);
+    if (blockOnRugFail) {
+      ok = false;
+      reasons.push("RugCheck unavailable");
+    }
+  }
+  if (honey?.error)
+    warnings.push(`Honeypot.is failed: ${honey.error.message || honey.error}`);
+  if (dex?.error)
+    warnings.push(`Dexscreener failed: ${dex.error.message || dex.error}`);
+  if (onchain?.error)
+    warnings.push(
+      `On-chain check failed: ${onchain.error.message || onchain.error}`
+    );
   for (const lr of lockerResults || []) {
-    if (lr?.error) warnings.push(`${lr.locker || "locker"} failed: ${lr.error.message || lr.error}`);
+    if (lr?.error)
+      warnings.push(
+        `${lr.locker || "locker"} failed: ${lr.error.message || lr.error}`
+      );
   }
 
   // Honeypot decision: any provider true blocks
@@ -326,11 +502,15 @@ export async function riskCheckToken(
   // Taxes: take worst case across providers
   const buyTaxPct = Math.max(
     0,
-    ...[rug?.buyTax, honey?.buyTax].map((x) => (x == null ? 0 : x <= 1 ? x * 100 : x))
+    ...[rug?.buyTax, honey?.buyTax].map((x) =>
+      x == null ? 0 : x <= 1 ? x * 100 : x
+    )
   );
   const sellTaxPct = Math.max(
     0,
-    ...[rug?.sellTax, honey?.sellTax].map((x) => (x == null ? 0 : x <= 1 ? x * 100 : x))
+    ...[rug?.sellTax, honey?.sellTax].map((x) =>
+      x == null ? 0 : x <= 1 ? x * 100 : x
+    )
   );
   const buyTaxBps = Math.round(buyTaxPct * 100);
   const sellTaxBps = Math.round(sellTaxPct * 100);
@@ -346,9 +526,15 @@ export async function riskCheckToken(
   // LP lock aggregation across providers
   const lpLockedRug = rug?.lpLocked;
   const lpLockedHoney = honey?.lpLocked;
-  const lockerFlags = (lockerResults || []).map((l) => l?.lpLocked).filter((v) => v !== undefined);
-  const anyUnlocked = [lpLockedRug, lpLockedHoney, ...lockerFlags].some((v) => v === false);
-  const anyLocked = [lpLockedRug, lpLockedHoney, ...lockerFlags].some((v) => v === true);
+  const lockerFlags = (lockerResults || [])
+    .map((l) => l?.lpLocked)
+    .filter((v) => v !== undefined);
+  const anyUnlocked = [lpLockedRug, lpLockedHoney, ...lockerFlags].some(
+    (v) => v === false
+  );
+  const anyLocked = [lpLockedRug, lpLockedHoney, ...lockerFlags].some(
+    (v) => v === true
+  );
 
   if (requireLpLock) {
     if (anyUnlocked) {
@@ -363,15 +549,24 @@ export async function riskCheckToken(
 
   // Liquidity threshold via Dexscreener
   const liquidityUsd = Number(dex?.liquidityUsd || 0);
-  if (minLiquidityUsd > 0 && (Number.isNaN(liquidityUsd) || liquidityUsd < minLiquidityUsd)) {
+  if (
+    minLiquidityUsd > 0 &&
+    (Number.isNaN(liquidityUsd) || liquidityUsd < minLiquidityUsd)
+  ) {
     ok = false;
-    reasons.push(`Liquidity below threshold: $${liquidityUsd.toFixed(0)} < $${minLiquidityUsd}`);
+    reasons.push(
+      `Liquidity below threshold: $${liquidityUsd.toFixed(
+        0
+      )} < $${minLiquidityUsd}`
+    );
   }
 
   // On-chain renounced checks
   const hasMintAuthority = Boolean(onchain?.hasMintAuthority);
   const hasFreezeAuthority = Boolean(onchain?.hasFreezeAuthority);
-  const envRequireRenounced = String(process.env.REQUIRE_RENOUNCED || "").toLowerCase() === "true" || process.env.REQUIRE_RENOUNCED === "1";
+  const envRequireRenounced =
+    String(process.env.REQUIRE_RENOUNCED || "").toLowerCase() === "true" ||
+    process.env.REQUIRE_RENOUNCED === "1";
   const needRenounced = requireRenounced || envRequireRenounced;
   if (needRenounced && (hasMintAuthority || hasFreezeAuthority)) {
     ok = false;
@@ -385,18 +580,35 @@ export async function riskCheckToken(
   const lpLockProviders = [];
   for (const l of lockerResults || []) {
     if (!l || l.error) continue;
-    lpLockProviders.push({ locker: l.locker, lpLocked: l.lpLocked, unlockAt: l.unlockAt });
+    lpLockProviders.push({
+      locker: l.locker,
+      lpLocked: l.lpLocked,
+      unlockAt: l.unlockAt,
+    });
     if (l.unlockAt && l.unlockAt > Date.now()) {
-      warnings.push(`LP unlock scheduled via ${l.locker} at ${new Date(l.unlockAt).toISOString()}`);
+      warnings.push(
+        `LP unlock scheduled via ${l.locker} at ${new Date(
+          l.unlockAt
+        ).toISOString()}`
+      );
       if (lpAlarmsEnabled) {
-        scheduleUnlockAlarms({ mint, provider: l.locker, unlockAt: l.unlockAt, preAlertHours });
+        scheduleUnlockAlarms({
+          mint,
+          provider: l.locker,
+          unlockAt: l.unlockAt,
+          preAlertHours,
+        });
       }
     }
   }
 
-  const details = { lpLock: { anyLocked, anyUnlocked, providers: lpLockProviders } };
+  const details = {
+    lpLock: { anyLocked, anyUnlocked, providers: lpLockProviders },
+  };
 
-  const result = ok ? { ok: true, warnings, details } : { ok: false, reasons, warnings, details };
+  const result = ok
+    ? { ok: true, warnings, details }
+    : { ok: false, reasons, warnings, details };
   riskCache.set(mint, { ts: Date.now(), result });
   return result;
 }
