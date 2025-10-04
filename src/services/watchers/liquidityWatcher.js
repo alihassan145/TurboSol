@@ -16,6 +16,13 @@ import { getRpcConnection } from "../rpc.js";
 const activeWatchers = new Map();
 const cooldowns = new Map(); // chatId:mint -> cool-until timestamp (ms)
 
+// Canonicalize mint strings: extract a valid base58 public key (32–44 chars)
+function canonicalizeMint(mint) {
+  const s = String(mint || "").trim();
+  const match = s.match(/[A-HJ-NP-Za-km-z1-9]{32,44}/);
+  return match ? match[0] : s;
+}
+
 export function startLiquidityWatch(
   chatId,
   {
@@ -34,7 +41,8 @@ export function startLiquidityWatch(
     signalType, // optional: specific signal type/id
   }
 ) {
-  const k = `${chatId}:${mint}`;
+  const canonicalMint = canonicalizeMint(mint);
+  const k = `${chatId}:${canonicalMint}`;
   const COOLDOWN_MS = Number(process.env.SNIPE_COOL_OFF_MS ?? 30000);
   const coolUntil = cooldowns.get(k) || 0;
   if (coolUntil && Date.now() < coolUntil) {
@@ -46,15 +54,23 @@ export function startLiquidityWatch(
     );
     return;
   }
+  // Atomic guard: reserve the watcher key immediately to avoid duplicate starts
   if (activeWatchers.has(k)) return;
+  activeWatchers.set(k, null);
 
   const baseInterval = Math.max(250, Number(pollInterval ?? 300));
   const maxAttempts = Number(retryCount ?? 3);
   let attempts = 0;
   let intervalMs = baseInterval;
   let stopped = false;
+  let inflightAttempt = false; // prevent overlapping attempts while awaiting confirmation
   // Warn only once for insufficient SOL and pause the watcher
   let insufficientWarned = false;
+  // Fee reserve configuration: ensure SOL is left for future fees (sell, etc.)
+  const stateForReserve = getUserState?.(chatId);
+  const MIN_FEE_RESERVE_SOL = Number(
+    stateForReserve?.minFeeReserveSol ?? process.env.MIN_FEE_RESERVE_SOL ?? 0.02
+  );
 
   // Liquidity delta heuristics & guardrails (configurable via ENV)
   const envDeltaEnabled =
@@ -78,7 +94,7 @@ export function startLiquidityWatch(
 
   // Persist the snipe job as active so it can be resumed on restart
   upsertActiveSnipe(chatId, {
-    mint,
+    mint: canonicalMint,
     amountSol,
     status: "active",
     startedAt: Date.now(),
@@ -104,14 +120,19 @@ export function startLiquidityWatch(
     }
     // balance preflight
     const bal = await getWalletBalance(chatId);
-    if ((bal?.solBalance || 0) < amountSol) {
+    const solBal = Number(bal?.solBalance || 0);
+    // Require enough to buy and still leave a fee reserve
+    if (solBal < amountSol || solBal - amountSol < MIN_FEE_RESERVE_SOL) {
       if (!insufficientWarned) {
+        const needed = Math.max(0, amountSol + MIN_FEE_RESERVE_SOL);
         onEvent?.(
-          `Insufficient SOL (${bal?.solBalance || 0}). Deposit to proceed.`
+          `Insufficient SOL (${solBal}). Need >= ${needed.toFixed(
+            4
+          )} SOL to buy and keep ${MIN_FEE_RESERVE_SOL} SOL for fees.`
         );
         insufficientWarned = true;
         // Pause this watcher to avoid repeated warnings
-        stopLiquidityWatch(chatId, mint, "insufficient_sol");
+        stopLiquidityWatch(chatId, canonicalizeMint(mint), "insufficient_sol");
       }
       return false;
     }
@@ -121,7 +142,7 @@ export function startLiquidityWatch(
         String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() === "true" ||
         process.env.REQUIRE_LP_LOCK === "1";
       const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
-      const risk = await riskCheckToken(mint, { requireLpLock, maxBuyTaxBps });
+    const risk = await riskCheckToken(canonicalMint, { requireLpLock, maxBuyTaxBps });
       if (!risk.ok) {
         onEvent?.(`Blocked by risk: ${risk.reasons?.join("; ")}`);
         return false;
@@ -132,6 +153,8 @@ export function startLiquidityWatch(
 
   const attempt = async () => {
     if (stopped) return;
+    if (inflightAttempt) return; // skip if an attempt is currently running
+    inflightAttempt = true;
     attempts += 1;
     try {
       const ready = await checkReady();
@@ -143,7 +166,7 @@ export function startLiquidityWatch(
       // quick readiness probe for route availability via shared Jupiter helper
       const route = await getQuoteRaw({
         inputMint: "So11111111111111111111111111111111111111112",
-        outputMint: mint,
+        outputMint: canonicalMint,
         amountRaw: Math.round(amountSol * 1e9),
         slippageBps: slippageBps ?? 100,
         timeoutMs: 900,
@@ -174,7 +197,7 @@ export function startLiquidityWatch(
         try {
           probeRoute = await getQuoteRaw({
             inputMint: "So11111111111111111111111111111111111111112",
-            outputMint: mint,
+            outputMint: canonicalMint,
             amountRaw: probeLamports,
             slippageBps: slippageBps ?? 100,
             timeoutMs: 700,
@@ -183,14 +206,14 @@ export function startLiquidityWatch(
         if (!probeRoute) {
           onEvent?.("Probe route unavailable yet, waiting...");
           try {
-            addTradeLog(chatId, {
-              kind: "telemetry",
-              mint,
-              stage: "probe_check",
-              status: "unavailable",
-              attempt: attempts,
-              probeLamports,
-            });
+              addTradeLog(chatId, {
+                kind: "telemetry",
+                mint: canonicalMint,
+                stage: "probe_check",
+                status: "unavailable",
+                attempt: attempts,
+                probeLamports,
+              });
           } catch {}
           return;
         }
@@ -209,15 +232,15 @@ export function startLiquidityWatch(
             )}% > ${DELTA_MAX_PRICE_IMPACT_PCT}%. Waiting for more depth.`
           );
           try {
-            addTradeLog(chatId, {
-              kind: "telemetry",
-              mint,
-              stage: "guardrail",
-              reason: "impact_exceeds_threshold",
-              priceImpactPct,
-              threshold: DELTA_MAX_PRICE_IMPACT_PCT,
-              attempt: attempts,
-            });
+          addTradeLog(chatId, {
+            kind: "telemetry",
+            mint: canonicalMint,
+            stage: "guardrail",
+            reason: "impact_exceeds_threshold",
+            priceImpactPct,
+            threshold: DELTA_MAX_PRICE_IMPACT_PCT,
+            attempt: attempts,
+          });
           } catch {}
           prevUnitOutProbe = unitOutProbe;
           return;
@@ -240,17 +263,17 @@ export function startLiquidityWatch(
               )}% < ${DELTA_MIN_IMPROV_PCT}% (age ${ageMs}ms). Waiting.`
             );
             try {
-              addTradeLog(chatId, {
-                kind: "telemetry",
-                mint,
-                stage: "guardrail",
-                reason: "improv_below_threshold",
-                improvPct,
-                minImprovementPct: DELTA_MIN_IMPROV_PCT,
-                ageMs,
-                minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
-                attempt: attempts,
-              });
+          addTradeLog(chatId, {
+            kind: "telemetry",
+            mint: canonicalMint,
+            stage: "guardrail",
+            reason: "improv_below_threshold",
+            improvPct,
+            minImprovementPct: DELTA_MIN_IMPROV_PCT,
+            ageMs,
+            minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
+            attempt: attempts,
+          });
             } catch {}
             prevUnitOutProbe = unitOutProbe;
             return;
@@ -262,15 +285,15 @@ export function startLiquidityWatch(
               `Route age ${age}ms < ${DELTA_MIN_ROUTE_AGE_MS}ms. Waiting.`
             );
             try {
-              addTradeLog(chatId, {
-                kind: "telemetry",
-                mint,
-                stage: "guardrail",
-                reason: "route_too_young",
-                ageMs: age,
-                minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
-                attempt: attempts,
-              });
+          addTradeLog(chatId, {
+            kind: "telemetry",
+            mint: canonicalMint,
+            stage: "guardrail",
+            reason: "route_too_young",
+            ageMs: age,
+            minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
+            attempt: attempts,
+          });
             } catch {}
             prevUnitOutProbe = unitOutProbe;
             return;
@@ -284,7 +307,7 @@ export function startLiquidityWatch(
         try {
           alphaBus?.emit?.("liquidity_delta", {
             chatId,
-            mint,
+            mint: canonicalMint,
             unitOutProbe,
             prevUnitOutProbe,
             priceImpactPct,
@@ -298,14 +321,14 @@ export function startLiquidityWatch(
             ts: Date.now(),
           });
           try {
-            addTradeLog(chatId, {
-              kind: "telemetry",
-              mint,
-              stage: "delta_emitted",
-              unitOutProbe,
-              priceImpactPct,
-              attempt: attempts,
-            });
+          addTradeLog(chatId, {
+            kind: "telemetry",
+            mint: canonicalMint,
+            stage: "delta_emitted",
+            unitOutProbe,
+            priceImpactPct,
+            attempt: attempts,
+          });
           } catch {}
         } catch {}
       }
@@ -329,14 +352,14 @@ export function startLiquidityWatch(
           const [routeSmall, routeLarge] = await Promise.all([
             getQuoteRaw({
               inputMint: "So11111111111111111111111111111111111111112",
-              outputMint: mint,
+              outputMint: canonicalMint,
               amountRaw: Math.round(smallAmtSol * 1e9),
               slippageBps: slippageBps ?? 100,
               timeoutMs: 900,
             }).catch(() => null),
             getQuoteRaw({
               inputMint: "So11111111111111111111111111111111111111112",
-              outputMint: mint,
+              outputMint: canonicalMint,
               amountRaw: Math.round(largeAmtSol * 1e9),
               slippageBps: slippageBps ?? 100,
               timeoutMs: 900,
@@ -405,9 +428,28 @@ export function startLiquidityWatch(
       if (prio && attempts <= 3)
         prio = Math.floor(prio * (0.7 + 0.15 * (attempts - 1)));
 
+      // Enforce fee reserve by dynamically reducing buy size if needed
+      try {
+        const bal = await getWalletBalance(chatId);
+        const solBal = Number(bal?.solBalance || 0);
+        const availableForBuy = Math.max(0, solBal - MIN_FEE_RESERVE_SOL);
+        const MIN_BUY_SOL_FLOOR = Number(
+          process.env.MIN_BUY_SOL_FLOOR ?? 0.005
+        );
+        if (availableForBuy < MIN_BUY_SOL_FLOOR) {
+          onEvent?.(
+            `Insufficient available after reserve. Need >= ${(
+              MIN_FEE_RESERVE_SOL + MIN_BUY_SOL_FLOOR
+            ).toFixed(4)} SOL total.`
+          );
+          throw new Error("insufficient_after_reserve");
+        }
+        buyAmountSol = Math.min(buyAmountSol, availableForBuy);
+      } catch (e) {}
+
       const swapRes = await performSwap({
         inputMint: "So11111111111111111111111111111111111111112",
-        outputMint: mint,
+        outputMint: canonicalMint,
         amountSol: buyAmountSol,
         slippageBps: slip,
         priorityFeeLamports: prio,
@@ -449,34 +491,55 @@ export function startLiquidityWatch(
       } catch {}
 
       if (!confirmedOk) {
-        // Treat as failed attempt so watcher can retry
+        const RETRY_ON_UNCONFIRMED_BUY = String(
+          process.env.RETRY_ON_UNCONFIRMED_BUY || ""
+        )
+          .toLowerCase()
+          .trim() === "true";
         try {
           addTradeLog(chatId, {
             kind: "status",
             statusOf: "buy",
-            mint,
+            mint: canonicalMint,
             sol: Number(buyAmountSol),
-            status: "failed",
+            status: RETRY_ON_UNCONFIRMED_BUY ? "failed" : "stopped",
             failReason: failedConf ? "tx_err" : "tx_unconfirmed_timeout",
             attempt: attempts,
             txid,
           });
         } catch {}
-        onEvent?.(
-          `⚠️ Swap tx not confirmed (${
-            failedConf ? "failed" : "timeout"
-          }). Retrying... Tx: ${txid}`
-        );
-        throw new Error("tx_not_confirmed");
+        if (RETRY_ON_UNCONFIRMED_BUY) {
+          onEvent?.(
+            `⚠️ Swap tx not confirmed (${failedConf ? "failed" : "timeout"}). Retrying... Tx: ${txid}`
+          );
+          throw new Error("tx_not_confirmed");
+        } else {
+          onEvent?.(
+            `⚠️ Swap tx not confirmed (${failedConf ? "failed" : "timeout"}). Stopping to avoid duplicate buys. Tx: ${txid}`
+          );
+          stopped = true;
+          stopLiquidityWatch(chatId, canonicalMint);
+          try {
+            cooldowns.set(k, Date.now() + COOLDOWN_MS);
+            addTradeLog(chatId, {
+              kind: "telemetry",
+              mint: canonicalMint,
+              stage: "cooldown_set",
+              coolOffMs: COOLDOWN_MS,
+              attempts,
+            });
+          } catch {}
+          return;
+        }
       }
 
-      onEvent?.(`Bought ${mint}. Tx: ${txid}`);
+      onEvent?.(`Bought ${canonicalMint}. Tx: ${txid}`);
 
       // Record buy trade log with detailed telemetry
       try {
         addTradeLog(chatId, {
           kind: "buy",
-          mint,
+          mint: canonicalMint,
           sol: Number(buyAmountSol),
           tokens: Number(swapRes?.output?.tokensOut ?? NaN),
           route: swapRes?.route?.labels,
@@ -495,14 +558,33 @@ export function startLiquidityWatch(
       // Arm Flash-LP guard immediately after buy
       try {
         const amtTokens = Number(swapRes?.output?.tokensOut ?? 0);
-        startFlashLpGuard(chatId, { mint, amountTokens: amtTokens, onEvent });
+        startFlashLpGuard(chatId, { mint: canonicalMint, amountTokens: amtTokens, onEvent });
       } catch {}
 
       // Mark executed in the store before stopping the watcher
-      markSnipeExecuted(chatId, mint, { txid }).catch(() => {});
+      markSnipeExecuted(chatId, canonicalMint, { txid }).catch(() => {});
 
-      stopLiquidityWatch(chatId, mint);
-    } catch (e) {
+      stopLiquidityWatch(chatId, canonicalMint);
+  } catch (e) {
+      // If a global buy lock is active, stop this watcher and cool off to avoid duplicates
+      if (String(e?.message || "").includes("buy_locked")) {
+        try {
+          onEvent?.("🔒 Buy lock active: another buy in-flight for this token. Stopping to avoid duplicates.");
+          stopped = true;
+          stopLiquidityWatch(chatId, canonicalMint);
+          const COOLDOWN_MS = Number(process.env.SNIPE_COOL_OFF_MS ?? 30000);
+          cooldowns.set(k, Date.now() + COOLDOWN_MS);
+          addTradeLog(chatId, {
+            kind: "telemetry",
+            mint: canonicalMint,
+            stage: "buy_lock",
+            status: "stopped",
+            coolOffMs: COOLDOWN_MS,
+            attempts,
+          });
+        } catch {}
+        return;
+      }
       // adaptive backoff up to 2x base
       intervalMs = Math.min(baseInterval * 2, Math.floor(intervalMs * 1.25));
       // log failure attempt for telemetry
@@ -521,13 +603,13 @@ export function startLiquidityWatch(
       // stop after too many attempts to avoid infinite loops
       if (attempts >= maxAttempts) {
         stopped = true;
-        stopLiquidityWatch(chatId, mint);
+        stopLiquidityWatch(chatId, canonicalMint);
         onEvent?.(`Stopped watcher after ${attempts} attempts.`);
         try {
           cooldowns.set(k, Date.now() + COOLDOWN_MS);
           addTradeLog(chatId, {
             kind: "telemetry",
-            mint,
+            mint: canonicalMint,
             stage: "cooldown_set",
             coolOffMs: COOLDOWN_MS,
             attempts,
@@ -537,19 +619,26 @@ export function startLiquidityWatch(
     }
   };
 
-  const interval = setInterval(attempt, intervalMs);
+  const interval = setInterval(async () => {
+    try {
+      await attempt();
+    } finally {
+      inflightAttempt = false;
+    }
+  }, intervalMs);
   activeWatchers.set(k, interval);
-  onEvent?.(`Watching ${mint} every ${baseInterval}ms ...`);
+  onEvent?.(`Watching ${canonicalMint} every ${baseInterval}ms ...`);
 }
 
 export function stopLiquidityWatch(chatId, mint, reason = "stopped") {
+  const canonicalMint = canonicalizeMint(mint);
   if (mint) {
-    const k = `${chatId}:${mint}`;
+    const k = `${chatId}:${canonicalMint}`;
     const interval = activeWatchers.get(k);
     if (interval) clearInterval(interval);
     activeWatchers.delete(k);
     // If still active (not executed), mark as cancelled
-    markSnipeCancelled(chatId, mint, reason).catch(() => {});
+    markSnipeCancelled(chatId, canonicalMint, reason).catch(() => {});
     return true;
   }
   // stop all for chatId

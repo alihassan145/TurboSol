@@ -5,15 +5,23 @@ import { getWatchersPaused, getWatchersSlowMs, getPriorityFeeLamports, getUseJit
 
 const watchers = new Map();
 
+// Canonicalize mint strings: extract a valid base58 public key (32–44 chars)
+function canonicalizeMint(mint) {
+  const s = String(mint || "").trim();
+  const match = s.match(/[A-HJ-NP-Za-km-z1-9]{32,44}/);
+  return match ? match[0] : s;
+}
+
 export function startStopLoss(
   chatId,
   { mint, thresholdPct = 20, grid, pollMs = 400, onEvent }
 ) {
-  const k = `${chatId}:${mint}`;
+  const canonicalMint = canonicalizeMint(mint);
+  const k = `${chatId}:${canonicalMint}`;
   if (watchers.has(k)) return;
   const state = getUserState(chatId);
   const pos = state.positions.find(
-    (p) => p.mint === mint && p.status === "open"
+    (p) => p.mint === canonicalMint && p.status === "open"
   );
   if (!pos || !pos.avgPriceSolPerToken || !pos.tokensOut) {
     onEvent?.("No open position with avg price available.");
@@ -45,7 +53,7 @@ export function startStopLoss(
       const probeTokens = Math.max(0.000001, amountTokens * 0.01);
       const baseSlippage = 150; // generous to get quotes in stress
       const route = await getQuoteRaw({
-        inputMint: mint,
+        inputMint: canonicalMint,
         outputMint: "So11111111111111111111111111111111111111112",
         amountRaw: Math.floor(probeTokens * 1e6),
         slippageBps: baseSlippage,
@@ -59,7 +67,7 @@ export function startStopLoss(
           );
           try {
             const { txid } = await performSell({
-              tokenMint: mint,
+              tokenMint: canonicalMint,
               percent: 100,
               chatId,
             });
@@ -67,7 +75,7 @@ export function startStopLoss(
           } catch (e) {
             onEvent?.(`Sell failed: ${e.message || e}`);
           }
-          stopStopLoss(chatId, mint);
+          stopStopLoss(chatId, canonicalMint);
           return;
         }
         return;
@@ -81,7 +89,7 @@ export function startStopLoss(
         onEvent?.("Cliff drop detected (>30%). Exiting full position...");
         try {
           const { txid } = await performSell({
-            tokenMint: mint,
+            tokenMint: canonicalMint,
             percent: 100,
             chatId,
           });
@@ -89,7 +97,7 @@ export function startStopLoss(
         } catch (e) {
           onEvent?.(`Sell failed: ${e.message || e}`);
         }
-        stopStopLoss(chatId, mint);
+        stopStopLoss(chatId, canonicalMint);
         return;
       }
       lastPrice = priceNow;
@@ -103,7 +111,7 @@ export function startStopLoss(
           );
           try {
             const { txid } = await performSell({
-              tokenMint: mint,
+              tokenMint: canonicalMint,
               percent: 100,
               chatId,
             });
@@ -111,7 +119,7 @@ export function startStopLoss(
           } catch (e) {
             onEvent?.(`Sell failed: ${e.message || e}`);
           }
-          stopStopLoss(chatId, mint);
+          stopStopLoss(chatId, canonicalMint);
         }
       } else {
         // Grid mode: fire partial exits as thresholds are crossed
@@ -124,7 +132,7 @@ export function startStopLoss(
             onEvent?.(`Grid stop hit: -${d}% -> selling ${sellPct}%`);
             try {
               const { txid } = await performSell({
-                tokenMint: mint,
+                tokenMint: canonicalMint,
                 percent: sellPct,
                 chatId,
               });
@@ -135,7 +143,7 @@ export function startStopLoss(
           }
         }
         if (fired.size === gridLevels.length) {
-          stopStopLoss(chatId, mint);
+          stopStopLoss(chatId, canonicalMint);
           onEvent?.("All grid levels executed. Stop-loss watcher stopped.");
         }
       }
@@ -151,14 +159,15 @@ export function startStopLoss(
   });
   onEvent?.(
     gridLevels
-      ? `Grid stop-loss armed for ${mint}`
-      : `Stop-loss armed at -${threshold}% for ${mint}`
+      ? `Grid stop-loss armed for ${canonicalMint}`
+      : `Stop-loss armed at -${threshold}% for ${canonicalMint}`
   );
   loop();
 }
 
 export function stopStopLoss(chatId, mint) {
-  const k = `${chatId}:${mint}`;
+  const canonicalMint = canonicalizeMint(mint);
+  const k = `${chatId}:${canonicalMint}`;
   const stop = watchers.get(k);
   if (stop) stop();
   watchers.delete(k);
@@ -170,10 +179,11 @@ async function probeQuote({
   baseSlippage = 100,
   timeoutMs = 900,
 }) {
+  const canonicalMint = canonicalizeMint(mint);
   // Convert probe token amount (assumed 6 decimals SPL) to raw amount for Jupiter
   const amountRaw = Math.floor(probeTokens * 1e6);
   const route = await getQuoteRaw({
-    inputMint: mint,
+    inputMint: canonicalMint,
     outputMint: "So11111111111111111111111111111111111111112",
     amountRaw,
     slippageBps: baseSlippage,
@@ -188,7 +198,8 @@ export async function checkStopLoss({
   probeTokens = 1,
   baseSlippage = 100,
 }) {
-  const route = await probeQuote({ mint, probeTokens, baseSlippage }).catch(
+  const canonicalMint = canonicalizeMint(mint);
+  const route = await probeQuote({ mint: canonicalMint, probeTokens, baseSlippage }).catch(
     () => null
   );
   if (!route) return { triggered: false };
@@ -216,26 +227,52 @@ export function startFlashLpGuard(
     onEvent,
   }
 ) {
-  const k = `flash:${chatId}:${mint}`;
+  const canonicalMint = canonicalizeMint(mint);
+  const k = `flash:${chatId}:${canonicalMint}`;
   if (flashWatchers.has(k)) return;
   let running = true;
   const endAt = Date.now() + Math.max(5000, windowMs);
   let lastPrice = null;
   let noQuote = 0;
+  let selling = false;
 
   const sellAll = async (reason = "Flash LP guard: exiting...") => {
     try {
+      if (selling) return;
+      selling = true;
       onEvent?.(`${reason}`);
-      const { txid } = await performSell({
-        tokenMint: mint,
-        percent: 100,
-        slippageBps: Number(process.env.FLASH_LP_EXIT_SLIPPAGE_BPS || 300),
-        priorityFeeLamports: getPriorityFeeLamports(),
-        useJitoBundle: getUseJitoBundle(),
-        chatId,
-      });
-      onEvent?.(`Sold. Tx: ${txid}`);
+      const maxRetries = Number(process.env.FLASH_LP_SELL_RETRIES || 3);
+      const baseDelayMs = Number(process.env.FLASH_LP_SELL_BACKOFF_MS || 500);
+      let attempt = 0;
+      let lastErr = null;
+      while (attempt <= maxRetries) {
+        try {
+          const { txid } = await performSell({
+            tokenMint: canonicalMint,
+            percent: 100,
+            slippageBps: Number(process.env.FLASH_LP_EXIT_SLIPPAGE_BPS || 300),
+            priorityFeeLamports: getPriorityFeeLamports(),
+            useJitoBundle: getUseJitoBundle(),
+            chatId,
+          });
+          onEvent?.(`Sold. Tx: ${txid}`);
+          selling = false;
+          return;
+        } catch (e) {
+          lastErr = e;
+          const msg = String(e?.message || e);
+          const isRateLimited = /429|rate/i.test(msg);
+          if (attempt >= maxRetries || !isRateLimited) break;
+          const waitMs = baseDelayMs * (attempt + 1);
+          onEvent?.(`Sell retry ${attempt + 1}/${maxRetries} after ${waitMs}ms (reason: ${msg.slice(0, 120)})`);
+          await new Promise((r) => setTimeout(r, waitMs));
+          attempt += 1;
+        }
+      }
+      selling = false;
+      onEvent?.(`Sell failed: ${lastErr?.message || lastErr}`);
     } catch (e) {
+      selling = false;
       onEvent?.(`Sell failed: ${e?.message || e}`);
     }
   };
@@ -260,16 +297,15 @@ export function startFlashLpGuard(
       const largeProbe = Math.max(smallProbe * 4, (amt > 0 ? amt * 0.02 : 0.04));
       const baseSlippage = 150;
 
-      const [routeSmall, routeLarge] = await Promise.all([
-        probeQuote({ mint, probeTokens: smallProbe, baseSlippage, timeoutMs: 900 }).catch(() => null),
-        probeQuote({ mint, probeTokens: largeProbe, baseSlippage, timeoutMs: 900 }).catch(() => null),
-      ]);
+      // Probe sequentially to reduce bursty rate-limits under stress
+      const routeSmall = await probeQuote({ mint: canonicalMint, probeTokens: smallProbe, baseSlippage, timeoutMs: 900 }).catch(() => null);
+      const routeLarge = await probeQuote({ mint: canonicalMint, probeTokens: largeProbe, baseSlippage, timeoutMs: 900 }).catch(() => null);
 
       if (!routeSmall && !routeLarge) {
         noQuote += 1;
         if (noQuote >= maxNoQuote) {
           await sellAll("Flash-LP suspected: quotes vanished. Exiting now...");
-          stopFlashLpGuard(chatId, mint);
+          stopFlashLpGuard(chatId, canonicalMint);
           return;
         }
         return;
@@ -284,7 +320,7 @@ export function startFlashLpGuard(
 
       if (lastPrice && priceNow && priceNow < lastPrice * (1 - cliffDropPct / 100)) {
         await sellAll(`Cliff drop >${cliffDropPct}% detected. Exiting...`);
-        stopFlashLpGuard(chatId, mint);
+        stopFlashLpGuard(chatId, canonicalMint);
         return;
       }
       if (priceNow) lastPrice = priceNow;
@@ -293,7 +329,7 @@ export function startFlashLpGuard(
       const impactLarge = Number(routeLarge?.priceImpactPct ?? 0);
       if (impactLarge >= impactExitPct) {
         await sellAll(`Extreme price impact (${impactLarge.toFixed(1)}%). Exiting...`);
-        stopFlashLpGuard(chatId, mint);
+        stopFlashLpGuard(chatId, canonicalMint);
         return;
       }
 
@@ -305,7 +341,7 @@ export function startFlashLpGuard(
           const ratio = unitOutLarge / Math.max(1e-9, unitOutSmall);
           if (ratio < 0.5) {
             await sellAll("Severe liquidity thinness detected. Exiting...");
-            stopFlashLpGuard(chatId, mint);
+            stopFlashLpGuard(chatId, canonicalMint);
             return;
           }
         }
@@ -320,12 +356,13 @@ export function startFlashLpGuard(
   flashWatchers.set(k, () => {
     running = false;
   });
-  onEvent?.(`Flash-LP guard armed for ${mint} (window ${(windowMs / 1000) | 0}s)`);
+  onEvent?.(`Flash-LP guard armed for ${canonicalMint} (window ${(windowMs / 1000) | 0}s)`);
   loop();
 }
 
 export function stopFlashLpGuard(chatId, mint) {
-  const k = `flash:${chatId}:${mint}`;
+  const canonicalMint = canonicalizeMint(mint);
+  const k = `flash:${chatId}:${canonicalMint}`;
   const stop = flashWatchers.get(k);
   if (stop) stop();
   flashWatchers.delete(k);

@@ -8,12 +8,51 @@ import { getUserWalletInstance } from "../wallet.js";
 import { getPriorityFeeLamports, getUseJitoBundle } from "../config.js";
 import { simulateBundleAndSend } from "../jito.js";
 import { getAdaptiveSlippageBps, recordSlippageFeedback } from "../slippage.js";
+import { initTrade, updateTradeStatus } from "../tradeState.js";
+import { monitorSignatures } from "../signatureMonitor.js";
+import { upsertPosition, applySellToPosition } from "../positionStore.js";
+import { recordPnlSnapshot } from "../positionStore.js";
+import { getUserState } from "../userState.js";
 
 export const NATIVE_SOL = "So11111111111111111111111111111111111111112";
 const JUP_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote";
 const JUP_SWAP_URL = "https://lite-api.jup.ag/swap/v1/swap";
 
 const mintDecimalsCache = new Map();
+
+// Global buy locks to prevent concurrent duplicate buys across sources (per chatId+mint)
+const _buyLocks = new Map(); // key: `${chatId}:${mint}` -> expiresAt (ms)
+
+// Canonicalize mint strings: extract a valid base58 public key (32–44 chars)
+function canonicalizeMint(mint) {
+  const s = String(mint || "").trim();
+  const match = s.match(/[A-HJ-NP-Za-km-z1-9]{32,44}/);
+  return match ? match[0] : s;
+}
+
+function getBuyLockKey(chatId, mint) {
+  const canonical = canonicalizeMint(mint);
+  return `${chatId}:${canonical}`;
+}
+
+function isBuyLocked(chatId, mint) {
+  const k = getBuyLockKey(chatId, mint);
+  const until = _buyLocks.get(k) || 0;
+  return until && Date.now() < until;
+}
+
+function acquireBuyLock(chatId, mint) {
+  const k = getBuyLockKey(chatId, mint);
+  const ttlMs = Number(
+    process.env.BUY_LOCK_MS || process.env.TX_CONFIRM_MAX_WAIT_MS || 90000
+  );
+  _buyLocks.set(k, Date.now() + ttlMs);
+}
+
+function releaseBuyLock(chatId, mint) {
+  const k = getBuyLockKey(chatId, mint);
+  _buyLocks.delete(k);
+}
 
 function promiseWithTimeout(promise, ms, tag = "timeout") {
   let to;
@@ -90,28 +129,28 @@ export async function getQuoteRaw({
       errorMessage: data.error || "",
     };
   }
-  
+
   const responseData = res.data;
-  
+
   // Validate response structure
-  if (!responseData || typeof responseData !== 'object') {
+  if (!responseData || typeof responseData !== "object") {
     return null;
   }
-  
+
   // Check if response contains an error
   if (responseData.error || responseData.errorCode) {
     return {
       __error__: true,
-      errorCode: responseData.errorCode || 'API_ERROR',
-      errorMessage: responseData.error || 'Unknown API error',
+      errorCode: responseData.errorCode || "API_ERROR",
+      errorMessage: responseData.error || "Unknown API error",
     };
   }
-  
+
   // Check if response has essential fields for a valid quote
   if (!responseData.outAmount || !responseData.routePlan) {
     return null;
   }
-  
+
   return responseData;
 }
 
@@ -131,7 +170,9 @@ export async function getTokenQuote({
   );
 
   const tryGet = async (bps, tmo, direct = false, amt = amountRaw) => {
-    console.log(`[QUOTE] Attempting quote with slippage: ${bps}bps, timeout: ${tmo}ms, direct: ${direct}, amount: ${amt}`);
+    console.log(
+      `[QUOTE] Attempting quote with slippage: ${bps}bps, timeout: ${tmo}ms, direct: ${direct}, amount: ${amt}`
+    );
     let r = await getQuoteRaw({
       inputMint,
       outputMint,
@@ -143,22 +184,27 @@ export async function getTokenQuote({
       console.log(`[QUOTE] Error in getQuoteRaw:`, err.message);
       return null;
     });
-    
+
     if (r && r.__error__) {
       console.log(`[QUOTE] API returned error:`, r.errorCode, r.errorMessage);
       // Avoid throwing here; callers expect null on failure
       r = null;
     } else if (r) {
-      console.log(`[QUOTE] Success! outAmount: ${r.outAmount}, priceImpact: ${r.priceImpactPct}%`);
+      console.log(
+        `[QUOTE] Success! outAmount: ${r.outAmount}, priceImpact: ${r.priceImpactPct}%`
+      );
     } else {
       console.log(`[QUOTE] No route found`);
     }
-    
+
     return r;
   };
 
   let route = await tryGet(slippageBps, baseTimeout);
-  console.log(`[QUOTE] Final route result:`, route ? `Found route with outAmount: ${route.outAmount}` : 'No route found');
+  console.log(
+    `[QUOTE] Final route result:`,
+    route ? `Found route with outAmount: ${route.outAmount}` : "No route found"
+  );
 
   if (!route) route = await tryGet(slippageBps, fallbackTimeout);
   if (!route && fallbackSlippageBps > slippageBps)
@@ -176,7 +222,9 @@ export async function getTokenQuote({
         probe
       );
       if (rProbe) {
-        console.log(`[QUOTE] Found route with larger amount (${mult}x), but returning null to maintain UX`);
+        console.log(
+          `[QUOTE] Found route with larger amount (${mult}x), but returning null to maintain UX`
+        );
         // We found a route with a higher amount, but to keep existing UX, just return null and let UI handle amount input
         break;
       }
@@ -217,9 +265,9 @@ async function buildAndSignSwapTx({
     prioritizationFeeLamports: {
       priorityLevelWithMaxLamports: {
         maxLamports: priorityFeeLamports ?? 10000000,
-        priorityLevel: "veryHigh"
-      }
-    }
+        priorityLevel: "veryHigh",
+      },
+    },
   };
   const res = await axios.post(JUP_SWAP_URL, body, {
     timeout: Number(process.env.SWAP_BUILD_TIMEOUT_MS || 5000),
@@ -244,16 +292,36 @@ export async function performSwap({
   useJitoBundle,
   slippageBps: slippageBpsOverride,
   walletOverride,
+  tradeKey,
 }) {
   if (!Number.isFinite(Number(amountSol)) || Number(amountSol) <= 0)
     throw new Error("invalid_amount");
   const connection = getRpcConnection();
   const wallet = walletOverride || (await getUserWalletInstance(chatId));
+  const state = chatId != null ? getUserState(chatId) : {};
   const slippageBps = Number.isFinite(Number(slippageBpsOverride))
     ? Number(slippageBpsOverride)
+    : Number.isFinite(Number(state?.snipeSlippage))
+    ? Number(state.snipeSlippage)
     : await getAdaptiveSlippageBps().catch(() =>
         Number(process.env.DEFAULT_SLIPPAGE_BPS || 100)
       );
+
+  const effectivePriorityFeeLamports =
+    priorityFeeLamports != null
+      ? Number(priorityFeeLamports)
+      : Number.isFinite(Number(state?.priorityFeeLamports))
+      ? Number(state.priorityFeeLamports)
+      : Number.isFinite(Number(state?.maxSnipeGasPrice))
+      ? Number(state.maxSnipeGasPrice)
+      : Number(getPriorityFeeLamports() || 0);
+
+  const effectiveUseJitoBundle =
+    useJitoBundle != null
+      ? !!useJitoBundle
+      : state?.enableJitoForSnipes != null
+      ? !!state.enableJitoForSnipes
+      : !!getUseJitoBundle();
 
   const quoteRes = await getTokenQuote({
     inputMint,
@@ -264,10 +332,42 @@ export async function performSwap({
   const route = quoteRes?.route || null;
   if (!route) throw new Error("no_quote_route");
 
+  // Prevent concurrent duplicate buys across multiple sources by enforcing a global per-chat+mint lock
+  const isSolToToken = String(inputMint) === NATIVE_SOL && !!outputMint && chatId != null;
+  let lockAcquired = false;
+  if (isSolToToken) {
+    if (isBuyLocked(chatId, outputMint)) {
+      throw new Error("buy_locked");
+    }
+    acquireBuyLock(chatId, outputMint);
+    lockAcquired = true;
+  }
+
+  // Pre-compute expected tokens out for trade state
+  const outDecPre = await getMintDecimals(outputMint, connection).catch(() => 6);
+  const tokensOutExpected = Number(route?.outAmount)
+    ? Number(route.outAmount) / 10 ** outDecPre
+    : null;
+  const tk = tradeKey || `${String(chatId)}:${outputMint}:${Date.now()}`;
+  try {
+    initTrade({
+      tradeKey: tk,
+      chatId,
+      wallet: wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+      mint: outputMint,
+      side: "buy",
+      amountSol,
+      tokens: tokensOutExpected,
+      slippageBps,
+      priorityFeeLamports: priorityFeeLamports ?? "auto",
+      via: null,
+    });
+  } catch {}
+
   const tx = await buildAndSignSwapTx({
     route,
     userPk: wallet.publicKey.toBase58(),
-    priorityFeeLamports,
+    priorityFeeLamports: effectivePriorityFeeLamports,
     chatId,
   });
   tx.sign([wallet]);
@@ -277,7 +377,7 @@ export async function performSwap({
     sendRes = await simulateBundleAndSend({
       signedTx: tx,
       chatId,
-      useJitoBundle: useJitoBundle ?? getUseJitoBundle(),
+      useJitoBundle: effectiveUseJitoBundle,
       priorityFeeMicroLamports: null,
     });
   } catch (e) {
@@ -289,6 +389,10 @@ export async function performSwap({
         latencyMs: null,
       });
     } catch {}
+    // Release buy lock on immediate send/build failure
+    if (lockAcquired) {
+      try { releaseBuyLock(chatId, outputMint); } catch {}
+    }
     throw e;
   }
   try {
@@ -305,14 +409,53 @@ export async function performSwap({
     ? Number(route.outAmount) / 10 ** outDec
     : null;
 
+  const txid = sendRes?.txid || null;
+  // If send produced no txid, release the buy lock to allow retry
+  if (!txid && lockAcquired) {
+    try { releaseBuyLock(chatId, outputMint); } catch {}
+  }
+  try {
+    updateTradeStatus(tk, "pending", { txid, confirmations: 0 });
+    // Monitor confirmation and update position store on success
+    if (txid) {
+      monitorSignatures({
+        connection,
+        signatures: [txid],
+        tradeKey: tk,
+        chatId,
+        kind: "Buy",
+        onConfirmed: ({ trade }) => {
+          try {
+            upsertPosition({
+              chatId,
+              wallet: wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+              mint: outputMint,
+              tokensAdded: Number(trade?.tokens || tokensOut || 0),
+              solSpent: Number(amountSol || 0),
+              feesLamports: Number(effectivePriorityFeeLamports || 0),
+            });
+            recordPnlSnapshot(chatId, {
+              kind: "buy",
+              mint: outputMint,
+              wallet: wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+              tokens: Number(trade?.tokens || tokensOut || 0),
+              sol: Number(amountSol || 0),
+              feesLamports: Number(effectivePriorityFeeLamports || 0),
+            });
+          } catch {}
+        },
+      }).catch(() => {});
+    }
+  } catch {}
+
   return {
-    txid: sendRes?.txid || null,
+    txid,
     route: {
       labels: deriveRouteLabels(route),
       priceImpactPct: route?.priceImpactPct ?? null,
     },
     slippageBps,
-    priorityFeeLamports: priorityFeeLamports ?? "auto",
+    priorityFeeLamports: effectivePriorityFeeLamports ?? "auto",
     via: sendRes?.via || null,
     latencyMs: sendRes?.latencyMs ?? null,
     lastSendRaceWinner: sendRes?.lastSendRaceWinner ?? null,
@@ -329,9 +472,11 @@ export async function quickSell({
   priorityFeeLamports,
   useJitoBundle,
   slippageBps: slippageBpsOverride,
+  tradeKey,
 }) {
   const connection = getRpcConnection();
   const wallet = await getUserWalletInstance(chatId);
+  const state = chatId != null ? getUserState(chatId) : {};
 
   // Fetch token balance (sum across accounts of this mint)
   const resp = await getParsedTokenAccountsByOwnerRaced(
@@ -350,9 +495,14 @@ export async function quickSell({
     (rawBalance * BigInt(Math.max(1, Math.min(100, Math.floor(percent))))) /
     100n;
   if (sellRaw <= 0n) throw new Error("sell_amount_zero");
+  // Estimate tokens sold for trade state
+  const outDecTok = await getMintDecimals(tokenMint, connection).catch(() => 6);
+  const tokensSold = Number(sellRaw) / 10 ** outDecTok;
 
   const slippageBps = Number.isFinite(Number(slippageBpsOverride))
     ? Number(slippageBpsOverride)
+    : Number.isFinite(Number(state?.snipeSlippage))
+    ? Number(state.snipeSlippage)
     : await getAdaptiveSlippageBps().catch(() =>
         Number(process.env.DEFAULT_SLIPPAGE_BPS || 100)
       );
@@ -364,10 +514,42 @@ export async function quickSell({
   }).catch(() => null);
   if (!route) throw new Error("no_quote_route");
 
+  const tk = tradeKey || `${String(chatId)}:${tokenMint}:${Date.now()}`;
+  try {
+    initTrade({
+      tradeKey: tk,
+      chatId,
+      wallet: wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+      mint: tokenMint,
+      side: "sell",
+      amountSol: null,
+      tokens: tokensSold,
+      slippageBps,
+      priorityFeeLamports: priorityFeeLamports ?? "auto",
+      via: null,
+    });
+  } catch {}
+
+  const effectivePriorityFeeLamports =
+    priorityFeeLamports != null
+      ? Number(priorityFeeLamports)
+      : Number.isFinite(Number(state?.priorityFeeLamports))
+      ? Number(state.priorityFeeLamports)
+      : Number.isFinite(Number(state?.maxSnipeGasPrice))
+      ? Number(state.maxSnipeGasPrice)
+      : Number(getPriorityFeeLamports() || 0);
+
+  const effectiveUseJitoBundle =
+    useJitoBundle != null
+      ? !!useJitoBundle
+      : state?.enableJitoForSnipes != null
+      ? !!state.enableJitoForSnipes
+      : !!getUseJitoBundle();
+
   const tx = await buildAndSignSwapTx({
     route,
     userPk: wallet.publicKey.toBase58(),
-    priorityFeeLamports,
+    priorityFeeLamports: effectivePriorityFeeLamports,
     chatId,
   });
   tx.sign([wallet]);
@@ -377,7 +559,7 @@ export async function quickSell({
     sendRes = await simulateBundleAndSend({
       signedTx: tx,
       chatId,
-      useJitoBundle: useJitoBundle ?? getUseJitoBundle(),
+      useJitoBundle: effectiveUseJitoBundle,
       priorityFeeMicroLamports: null,
     });
   } catch (e) {
@@ -404,14 +586,48 @@ export async function quickSell({
     ? Number(route.outAmount) / 1e9
     : null;
 
+  const txid = sendRes?.txid || null;
+  try {
+    updateTradeStatus(tk, "pending", { txid, confirmations: 0 });
+    if (txid) {
+      monitorSignatures({
+        connection,
+        signatures: [txid],
+        tradeKey: tk,
+        chatId,
+        kind: "Sell",
+        onConfirmed: () => {
+          try {
+            applySellToPosition({
+              chatId,
+              wallet: wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+              mint: tokenMint,
+              tokensSold: Number(tokensSold || 0),
+              solReceived: Number(tokensOut || 0),
+              feesLamports: Number(effectivePriorityFeeLamports || 0),
+            });
+            recordPnlSnapshot(chatId, {
+              kind: "sell",
+              mint: tokenMint,
+              wallet: wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+              tokens: Number(tokensSold || 0),
+              sol: Number(tokensOut || 0),
+              feesLamports: Number(effectivePriorityFeeLamports || 0),
+            });
+          } catch {}
+        },
+      }).catch(() => {});
+    }
+  } catch {}
+
   return {
-    txid: sendRes?.txid || null,
+    txid,
     route: {
       labels: deriveRouteLabels(route),
       priceImpactPct: route?.priceImpactPct ?? null,
     },
     slippageBps,
-    priorityFeeLamports: priorityFeeLamports ?? "auto",
+    priorityFeeLamports: effectivePriorityFeeLamports ?? "auto",
     via: sendRes?.via || null,
     latencyMs: sendRes?.latencyMs ?? null,
     lastSendRaceWinner: sendRes?.lastSendRaceWinner ?? null,

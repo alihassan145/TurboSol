@@ -7,6 +7,7 @@ import { recordPriorityFeeFeedback } from "./fees.js";
 const endpointStats = new Map();
 const SEND_TIMEOUT_MS = Number(process.env.RPC_SEND_TIMEOUT_MS || 2000);
 const READ_TIMEOUT_MS = Number(process.env.RPC_READ_TIMEOUT_MS || 8000);
+const READ_RACE_RETRIES = Number(process.env.RPC_READ_RACE_RETRIES || 1);
 const STAGGER_STEP_MS = Number(process.env.RPC_STAGGER_STEP_MS || 20);
 const INTER_WAVE_DELAY_MS = Number(process.env.RPC_INTER_WAVE_DELAY_MS || 40);
 const MAX_BACKOFF_MS = 60_000;
@@ -68,6 +69,23 @@ function recordFailure(url) {
 function isBackoffActive(url) {
   const s = getStats(url);
   return s.backoffUntil && s.backoffUntil > nowMs();
+}
+
+function applyFailurePenalty(url, error) {
+  try {
+    const msg = String(error?.message || "").toLowerCase();
+    // Base penalty
+    recordFailure(url);
+    // Heavier penalty for gateway failures
+    if (msg.includes("502") || msg.includes("bad gateway")) {
+      recordFailure(url);
+      recordFailure(url);
+    }
+    // Mild extra penalty for timeouts
+    if (msg.includes("timeout") || msg.includes("timed out")) {
+      recordFailure(url);
+    }
+  } catch {}
 }
 
 function promiseWithTimeout(promise, ms, tag = "timeout") {
@@ -567,37 +585,53 @@ async function raceReadAcrossEndpoints({ callImpl, microBatch = 2 }) {
   let attempts = 0;
   let lastError;
 
-  for (let gi = 0; gi < groups.length; gi++) {
-    const group = groups[gi];
-    // Grow timeout per wave up to 3x to accommodate congested RPCs
-    const baseTimeout = READ_TIMEOUT_MS * Math.min(3, gi + 1);
+  // Allow limited retries across all waves for transient failures
+  const maxRetries = Number.isFinite(READ_RACE_RETRIES) ? Math.max(0, READ_RACE_RETRIES) : 1;
 
-    const attemptsInGroup = group.map((url, idx) => {
-      const delayMs = idx * STAGGER_STEP_MS + Math.floor(Math.random() * 15);
-      return (async () => {
-        await sleep(delayMs);
-        attempts += 1;
-        try {
-          const res = await promiseWithTimeout(
-            callImpl(url),
-            baseTimeout,
-            "read_timeout"
-          );
-          return res;
-        } catch (e) {
-          recordFailure(url);
-          throw e;
-        }
-      })();
-    });
+  for (let retry = 0; retry <= maxRetries; retry++) {
+    for (let gi = 0; gi < groups.length; gi++) {
+      const group = groups[gi];
+      // Grow timeout per wave up to 3x to accommodate congested RPCs
+      const baseTimeout = READ_TIMEOUT_MS * Math.min(3, gi + 1);
 
-    try {
-      const res = await Promise.any(attemptsInGroup);
-      return res;
-    } catch (err) {
-      lastError = err?.errors?.[0] || err;
-      await sleep(INTER_WAVE_DELAY_MS);
+      const attemptsInGroup = group.map((url, idx) => {
+        const delayMs = idx * STAGGER_STEP_MS + Math.floor(Math.random() * 15);
+        return (async () => {
+          await sleep(delayMs);
+          attempts += 1;
+          try {
+            const res = await promiseWithTimeout(
+              callImpl(url),
+              baseTimeout,
+              "read_timeout"
+            );
+            return res;
+          } catch (e) {
+            applyFailurePenalty(url, e);
+            throw e;
+          }
+        })();
+      });
+
+      try {
+        const res = await Promise.any(attemptsInGroup);
+        return res;
+      } catch (err) {
+        lastError = err?.errors?.[0] || err;
+        await sleep(INTER_WAVE_DELAY_MS);
+      }
     }
+
+    // If we got here, the whole pass failed; decide whether to retry
+    const msg = String(lastError?.message || "").toLowerCase();
+    const isTransient = msg.includes("timeout") || msg.includes("bad gateway") || msg.includes("502");
+    if (retry < maxRetries && isTransient) {
+      // brief exponential backoff between retries
+      const backoff = 100 + retry * 200;
+      await sleep(backoff);
+      continue;
+    }
+    break;
   }
 
   throw lastError || new Error("read_race_failed");

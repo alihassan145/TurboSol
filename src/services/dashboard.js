@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getRpcStatus } from "./rpc.js";
+import { getUnrealizedPnlSummary } from "./pnl.js";
 import http from "http";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -43,9 +44,29 @@ app.get("/trades", (req, res) => {
 });
 
 // Summary endpoint
-app.get("/summary", (req, res) => {
-  // Placeholder for PnL summary computation
-  res.json({ message: "Summary not implemented yet" });
+app.get("/summary", async (req, res) => {
+  try {
+    const chatId = req.query.chatId || req.query.userId; // support both keys
+    if (!chatId) {
+      res.status(400).json({ error: "chatId (or userId) required" });
+      return;
+    }
+    const summary = await getUnrealizedPnlSummary(String(chatId)).catch(
+      () => null
+    );
+    if (!summary) {
+      res.status(200).json({
+        chatId: String(chatId),
+        totalExposureSol: 0,
+        unrealizedPnlSol: 0,
+        positions: [],
+      });
+      return;
+    }
+    res.status(200).json({ chatId: String(chatId), ...summary });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || "failed to compute summary" });
+  }
 });
 
 // Active users endpoint

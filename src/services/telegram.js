@@ -90,6 +90,8 @@ import { loadActiveSnipesByChat, markSnipeCancelled } from "./snipeStore.js";
 // import PumpListener from "./pumpListener.js";
 import PumpPortalListener from "./pumpPortalListener.js";
 import { startPreLPWatch, stopPreLPWatch } from "./preLPScanner.js";
+import { getUnrealizedPnlSummary } from "./pnl.js";
+import { getAllTrades } from "./tradeState.js";
 
 function parseFlags(parts) {
   const flags = {};
@@ -393,6 +395,100 @@ export async function startTelegramBot() {
       );
     } catch (e) {
       await bot.sendMessage(chatId, `Delta toggle failed: ${e?.message || e}`);
+    }
+  });
+
+  // Set manual slippage for trades: /slippage <bps>
+  bot.onText(/\/slippage\s+(\d+)/i, async (msg, match) => {
+    try {
+      const chatId = msg.chat.id;
+      const bps = Number(match?.[1] || NaN);
+      if (!Number.isFinite(bps) || bps <= 0 || bps > 5000) {
+        await bot.sendMessage(
+          chatId,
+          "❌ Invalid slippage. Provide a positive number in bps (1–5000)."
+        );
+        return;
+      }
+      updateUserSetting(chatId, "snipeSlippage", Math.floor(bps));
+      await bot.sendMessage(
+        chatId,
+        `✅ Slippage set to ${Math.floor(bps)} bps for manual trades.`
+      );
+    } catch (e) {
+      try {
+        await bot.sendMessage(
+          msg.chat.id,
+          `❌ Failed to set slippage: ${e?.message || e}`
+        );
+      } catch {}
+    }
+  });
+
+  // Show PnL summary: /pnl
+  bot.onText(/\/pnl/i, async (msg) => {
+    try {
+      const chatId = msg.chat.id;
+      const summary = await getUnrealizedPnlSummary(chatId).catch(() => null);
+      if (!summary) {
+        await bot.sendMessage(chatId, "ℹ️ No positions to summarize yet.");
+        return;
+      }
+      const {
+        totalExposureSol = 0,
+        unrealizedPnlSol = 0,
+        positions = [],
+      } = summary;
+      const header = `📊 PnL Summary\n• Exposure: ${totalExposureSol.toFixed(4)} SOL\n• Unrealized: ${unrealizedPnlSol.toFixed(4)} SOL`;
+      const lines = positions.slice(0, 10).map((p) => {
+        const ux = Number(p?.unrealized?.pnlSol || 0);
+        const ex = Number(p?.exposureSol || 0);
+        const mint = String(p?.mint || "?");
+        return `• ${mint.slice(0, 6)}…: Ex ${ex.toFixed(4)} | U ${ux.toFixed(4)} SOL`;
+      });
+      const more = positions.length > 10 ? `\n… ${positions.length - 10} more` : "";
+      await bot.sendMessage(chatId, `${header}\n${lines.join("\n")}${more}`);
+    } catch (e) {
+      try {
+        await bot.sendMessage(
+          msg.chat.id,
+          `❌ Failed to compute PnL: ${e?.message || e}`
+        );
+      } catch {}
+    }
+  });
+
+  // Show active (pending/failed) trades: /active
+  bot.onText(/\/active$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      const trades = (await getAllTrades()) || [];
+      const active = trades.filter(
+        (t) => String(t.chatId) === String(chatId) && t.status !== "confirmed"
+      );
+      if (!active.length) {
+        await bot.sendMessage(chatId, "No active trades.");
+        return;
+      }
+      const lines = active.map((t) => {
+        const ageSec = Math.max(
+          0,
+          Math.floor((Date.now() - (t.timestamp || Date.now())) / 1000)
+        );
+        const label = t.kind || t.type || "Trade";
+        const symbol = t.tokenSymbol || t.mint || "unknown";
+        const tx = t.txid ? `${t.txid.slice(0, 8)}…` : "no-tx";
+        return `• ${label} ${t.status} | ${symbol} | ${tx} | ${ageSec}s ago`;
+      });
+      await bot.sendMessage(
+        chatId,
+        `Active trades (${active.length}):\n${lines.join("\n")}`
+      );
+    } catch (e) {
+      await bot.sendMessage(
+        chatId,
+        `Failed to load active trades: ${e?.message || e}`
+      );
     }
   });
 
@@ -3159,7 +3255,48 @@ export async function startTelegramBot() {
 
       if (state.pendingInput?.type === "SNIPE_LP_TOKEN") {
         try {
-          const normalizedMint = new PublicKey(text.trim()).toBase58();
+          const normalizedMint = new PublicKey((text || "").trim()).toBase58();
+
+          // Guard: prevent using wallet addresses as token mints
+          let userWalletsList = [];
+          try {
+            userWalletsList = await listUserWallets(chatId);
+          } catch {}
+          if (userWalletsList?.some((w) => w?.publicKey === normalizedMint)) {
+            await bot.sendMessage(
+              chatId,
+              "❌ That looks like your wallet address, not a token mint.\nPlease paste the token's mint address (from Solscan or the project page)."
+            );
+            return;
+          }
+
+          // Validate the address corresponds to a SPL token mint
+          const conn = getRpcConnection();
+          let acct = null;
+          try {
+            acct = await conn.getAccountInfo(new PublicKey(normalizedMint));
+          } catch {}
+          const TOKEN_PROGRAM_ID =
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+          const TOKEN_2022_PROGRAM_ID =
+            "TokenzQdBNbLqUfnv3V9xRpxo3cLZg1VbG7sWXeDaD7B";
+
+          if (!acct) {
+            await bot.sendMessage(
+              chatId,
+              "❌ No account found for that address. Please send a valid token mint."
+            );
+            return;
+          }
+          const ownerStr = acct.owner?.toBase58?.() || "";
+          if (ownerStr !== TOKEN_PROGRAM_ID && ownerStr !== TOKEN_2022_PROGRAM_ID) {
+            await bot.sendMessage(
+              chatId,
+              "❌ Address is not a SPL token mint.\nSend the mint address of the token you want to snipe."
+            );
+            return;
+          }
+
           setPendingInput(chatId, {
             type: "SNIPE_LP_AMOUNT",
             tokenAddress: normalizedMint,
@@ -3172,7 +3309,7 @@ export async function startTelegramBot() {
         } catch (e) {
           await bot.sendMessage(
             chatId,
-            "❌ Invalid token address. Please send a valid Solana token mint."
+            "❌ Invalid address format. Please send a valid Solana token mint."
           );
         }
         return;

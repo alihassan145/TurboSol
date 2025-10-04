@@ -123,7 +123,17 @@ async function triggerAutoSnipe(chatId, mint, source) {
         useJitoBundle,
       },
     });
-    startLiquidityWatch(chatId, mint).catch(() => {});
+    startLiquidityWatch(chatId, {
+      mint,
+      amountSol: defaultSnipe,
+      priorityFeeLamports,
+      useJitoBundle,
+      pollInterval,
+      slippageBps,
+      retryCount,
+      source: `watch:${source}`,
+      signalType: "dev_wallet_activity",
+    }).catch(() => {});
   } catch {}
 }
 
