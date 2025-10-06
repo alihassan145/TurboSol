@@ -9,9 +9,14 @@ import {
 } from "../snipeStore.js";
 import { getWatchersPaused, getWatchersSlowMs } from "../config.js";
 import { addTradeLog, getUserState } from "../userState.js";
-import { startFlashLpGuard } from "./stopLossWatcher.js";
+import { startFlashLpGuard, startTakeProfitGuard } from "./stopLossWatcher.js";
 import { alphaBus } from "../alphaDetection.js";
-import { getRpcConnection } from "../rpc.js";
+import { PublicKey } from "@solana/web3.js";
+import {
+  getRpcConnection,
+  getTransactionRaced,
+  getSignaturesForAddressRaced,
+} from "../rpc.js";
 
 const activeWatchers = new Map();
 const cooldowns = new Map(); // chatId:mint -> cool-until timestamp (ms)
@@ -39,6 +44,7 @@ export function startLiquidityWatch(
     maxBuySol,
     source, // optional: origin of this watcher (e.g., 'alpha:pump_launch')
     signalType, // optional: specific signal type/id
+    lpSignature, // optional: tx signature for the LP addition (for Solscan link)
   }
 ) {
   const canonicalMint = canonicalizeMint(mint);
@@ -91,6 +97,300 @@ export function startLiquidityWatch(
   ); // optional min age since first route seen
   let prevUnitOutProbe = null;
   let routeFirstSeenAt = null;
+  // Track last seen AMM pool keys from Jupiter route to aid LP detection
+  let lastAmmKeys = [];
+  // LP detection wiring
+  let lpSig = lpSignature || null;
+  let logsSubIds = [];
+  const conn = getRpcConnection();
+  const RAYDIUM_AMM_PROGRAM =
+    process.env.RAYDIUM_AMM_PROGRAM || "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+  // Helper: subscribe to logs for a given program and capture LP signature
+  async function subscribeLpLogs(programId58) {
+    try {
+      const pid = new PublicKey(programId58);
+      const subId = await conn
+        .onLogs(
+          pid,
+          async ({ signature }) => {
+            try {
+              if (lpSig) return;
+              const tx = await getTransactionRaced(signature, {
+                commitment: "processed",
+                maxSupportedTransactionVersion: 0,
+              }).catch(() => null);
+              const keys = tx?.transaction?.message?.accountKeys || [];
+              const loadedW = tx?.meta?.loadedAddresses?.writable || [];
+              const loadedR = tx?.meta?.loadedAddresses?.readonly || [];
+              const keys58 = [
+                ...keys.map((k) => {
+                  try {
+                    return k?.pubkey ? k.pubkey.toBase58() : k.toBase58?.() || String(k);
+                  } catch {
+                    return String(k);
+                  }
+                }),
+                ...loadedW.map((k) => {
+                  try {
+                    return k?.toBase58?.() || String(k);
+                  } catch {
+                    return String(k);
+                  }
+                }),
+                ...loadedR.map((k) => {
+                  try {
+                    return k?.toBase58?.() || String(k);
+                  } catch {
+                    return String(k);
+                  }
+                }),
+              ];
+              const involvesMint = keys58.includes(canonicalMint);
+              const involvesAmm = lastAmmKeys?.some?.((ak) => keys58.includes(ak));
+              if (involvesMint || involvesAmm) {
+                lpSig = signature;
+                try {
+                  addTradeLog(chatId, {
+                    kind: "telemetry",
+                    mint: canonicalMint,
+                    stage: "lp_detected",
+                    lpSignature: signature,
+                    via: "logs_subscription",
+                    programId: programId58,
+                    match: involvesMint ? "mint" : involvesAmm ? "ammKey" : "unknown",
+                  });
+                } catch {}
+              }
+            } catch {}
+          },
+          "processed"
+        )
+        .catch(() => null);
+      if (subId != null) logsSubIds.push(subId);
+    } catch {}
+  }
+  // Helper: subscribe to logs that mention the target mint; capture earliest LP-like tx
+  async function subscribeMintLogs(mint58) {
+    try {
+      let mintKey;
+      try {
+        mintKey = new PublicKey(mint58);
+      } catch {
+        console.warn(`⚠️ Invalid mint passed to mint log subscription: ${mint58}`);
+        return;
+      }
+      const subId = await conn
+        .onLogs(
+          mintKey,
+          async ({ signature, logs }) => {
+            try {
+              if (lpSig) return;
+              const text = Array.isArray(logs?.logs)
+                ? logs.logs.join("\n")
+                : String(logs || "");
+              const looksLp = /liquidity|pool|lp|raydium|meteora|orca/i.test(text) ||
+                /initialize.*pool|create.*pool|add.*liquidity/i.test(text);
+              const tx = await getTransactionRaced(signature, {
+                commitment: "processed",
+                maxSupportedTransactionVersion: 0,
+              }).catch(() => null);
+              const keys = tx?.transaction?.message?.accountKeys || [];
+              const loadedW = tx?.meta?.loadedAddresses?.writable || [];
+              const loadedR = tx?.meta?.loadedAddresses?.readonly || [];
+              const keys58 = [
+                ...keys.map((k) => {
+                  try {
+                    return k?.pubkey ? k.pubkey.toBase58() : k.toBase58?.() || String(k);
+                  } catch {
+                    return String(k);
+                  }
+                }),
+                ...loadedW.map((k) => {
+                  try {
+                    return k?.toBase58?.() || String(k);
+                  } catch {
+                    return String(k);
+                  }
+                }),
+                ...loadedR.map((k) => {
+                  try {
+                    return k?.toBase58?.() || String(k);
+                  } catch {
+                    return String(k);
+                  }
+                }),
+              ];
+              const involvesMint = keys58.includes(canonicalMint);
+              const involvesAmm = lastAmmKeys?.some?.((ak) => keys58.includes(ak));
+              if (looksLp && (involvesMint || involvesAmm)) {
+                lpSig = signature;
+                try {
+                  addTradeLog(chatId, {
+                    kind: "telemetry",
+                    mint: canonicalMint,
+                    stage: "lp_detected",
+                    lpSignature: signature,
+                    via: "mint_mentions_subscription",
+                    match: involvesMint ? "mint" : involvesAmm ? "ammKey" : "unknown",
+                  });
+                } catch {}
+              }
+            } catch {}
+          },
+          "processed"
+        )
+        .catch(() => null);
+      if (subId != null) logsSubIds.push(subId);
+    } catch {}
+  }
+  // Always subscribe to Raydium by default
+  subscribeLpLogs(RAYDIUM_AMM_PROGRAM);
+  // Optionally subscribe to additional AMM programs via env (comma-separated list)
+  const MORE_AMM_PROGRAMS = String(process.env.LP_LOG_PROGRAM_IDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const pid of MORE_AMM_PROGRAMS) {
+    // Avoid duplicate subscription if Raydium is included in the list
+    if (pid === RAYDIUM_AMM_PROGRAM) continue;
+    subscribeLpLogs(pid);
+  }
+  // Also subscribe to logs that mention the mint directly to catch LP-add quickly
+  subscribeMintLogs(canonicalMint);
+
+  // Helper: quick scan recent signatures for this mint to find likely LP tx
+  async function findLikelyLpSignature({ mint58, route }) {
+    try {
+      const limit = Number(process.env.LP_SIG_SCAN_LIMIT || 15);
+      const scanTimeout = Number(process.env.LP_SIG_SCAN_TX_READ_TIMEOUT_MS || 6000);
+      const ammKeys = Array.isArray(route?.routePlan)
+        ? route.routePlan
+            .map((s) => s?.swapInfo?.ammKey)
+            .filter((x) => typeof x === "string" && x.length > 0)
+        : [];
+      const candidates = Array.from(new Set([mint58, ...ammKeys])).filter(Boolean);
+      const KEYWORDS = [
+        "initialize pool",
+        "add liquidity",
+        "create pool",
+        "initialize",
+        "liquidity",
+        "amm",
+        "pool",
+        "raydium",
+        "meteora",
+        "orca",
+      ];
+      for (const addr of candidates) {
+        const sigs = await getSignaturesForAddressRaced(addr, {
+          limit,
+          timeoutMs: Number(process.env.LP_SIG_SCAN_TIMEOUT_MS || 8000),
+          maxRetries: Number(process.env.LP_SIG_SCAN_RACE_RETRIES || 1),
+          microBatch: Number(process.env.LP_SIG_SCAN_MICRO_BATCH || 3),
+        }).catch(() => []);
+        for (const s of sigs || []) {
+          const sig = s?.signature || s;
+          const tx = await getTransactionRaced(sig, {
+            commitment: "processed",
+            maxSupportedTransactionVersion: 0,
+            timeoutMs: scanTimeout,
+            maxRetries: 1,
+          }).catch(() => null);
+          const logs = tx?.meta?.logMessages || [];
+          const line = (logs || []).join(" ").toLowerCase();
+          const keys = tx?.transaction?.message?.accountKeys || [];
+          const loadedW = tx?.meta?.loadedAddresses?.writable || [];
+          const loadedR = tx?.meta?.loadedAddresses?.readonly || [];
+          const keys58 = [
+            ...keys.map((k) => {
+              try {
+                return k?.pubkey ? k.pubkey.toBase58() : k.toBase58?.() || String(k);
+              } catch {
+                return String(k);
+              }
+            }),
+            ...loadedW.map((k) => {
+              try {
+                return k?.toBase58?.() || String(k);
+              } catch {
+                return String(k);
+              }
+            }),
+            ...loadedR.map((k) => {
+              try {
+                return k?.toBase58?.() || String(k);
+              } catch {
+                return String(k);
+              }
+            }),
+          ];
+          const keyMatch = keys58.includes(mint58) || ammKeys.some((ak) => keys58.includes(ak));
+          if ((line && KEYWORDS.some((kw) => line.includes(kw))) || keyMatch) {
+            return sig;
+          }
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  // Fallback: scan recent Raydium program signatures and match our mint
+  async function findLpSigViaProgramScan({ mint58 }) {
+    try {
+      const limit = Number(process.env.LP_SIG_PROGRAM_SCAN_LIMIT || 40);
+      const sigs = await getSignaturesForAddressRaced(RAYDIUM_AMM_PROGRAM, {
+        limit,
+        timeoutMs: Number(process.env.LP_SIG_SCAN_TIMEOUT_MS || 8000),
+        maxRetries: Number(process.env.LP_SIG_SCAN_RACE_RETRIES || 1),
+        microBatch: Number(process.env.LP_SIG_SCAN_MICRO_BATCH || 3),
+      }).catch(() => []);
+      for (const s of sigs || []) {
+        const sig = s?.signature || s;
+        const tx = await getTransactionRaced(sig, {
+          commitment: "processed",
+          maxSupportedTransactionVersion: 0,
+          timeoutMs: Number(process.env.LP_SIG_SCAN_TX_READ_TIMEOUT_MS || 6000),
+          maxRetries: 1,
+        }).catch(() => null);
+        const logsText = tx?.meta?.logMessages?.join("\n")?.toLowerCase?.() || "";
+        const looksLp = /liquidity|pool|lp|raydium|meteora|orca/.test(logsText) ||
+          /initialize.*pool|create.*pool|add.*liquidity/.test(logsText);
+        const keys = tx?.transaction?.message?.accountKeys || [];
+        const loadedW = tx?.meta?.loadedAddresses?.writable || [];
+        const loadedR = tx?.meta?.loadedAddresses?.readonly || [];
+        const keys58 = [
+          ...keys.map((k) => {
+            try {
+              return k?.pubkey ? k.pubkey.toBase58() : k.toBase58?.() || String(k);
+            } catch {
+              return String(k);
+            }
+          }),
+          ...loadedW.map((k) => {
+            try {
+              return k?.toBase58?.() || String(k);
+            } catch {
+              return String(k);
+            }
+          }),
+          ...loadedR.map((k) => {
+            try {
+              return k?.toBase58?.() || String(k);
+            } catch {
+              return String(k);
+            }
+          }),
+        ];
+        const involvesMint = keys58.includes(mint58);
+        if (looksLp && involvesMint) {
+          return sig;
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
 
   // Persist the snipe job as active so it can be resumed on restart
   upsertActiveSnipe(chatId, {
@@ -142,7 +442,10 @@ export function startLiquidityWatch(
         String(process.env.REQUIRE_LP_LOCK || "").toLowerCase() === "true" ||
         process.env.REQUIRE_LP_LOCK === "1";
       const maxBuyTaxBps = Number(process.env.MAX_BUY_TAX_BPS || 1500);
-    const risk = await riskCheckToken(canonicalMint, { requireLpLock, maxBuyTaxBps });
+      const risk = await riskCheckToken(canonicalMint, {
+        requireLpLock,
+        maxBuyTaxBps,
+      });
       if (!risk.ok) {
         onEvent?.(`Blocked by risk: ${risk.reasons?.join("; ")}`);
         return false;
@@ -184,6 +487,94 @@ export function startLiquidityWatch(
         return; // not ready yet
       }
 
+      // Log first liquidity detection (first time a route becomes available)
+      if (routeFirstSeenAt === null) {
+        routeFirstSeenAt = Date.now();
+        const outRaw = Number(route?.outAmount || 0);
+        const impact = Number(route?.priceImpactPct ?? 0);
+        // Cache last seen AMM keys from the route for log-match assistance
+        try {
+          lastAmmKeys = Array.isArray(route?.routePlan)
+            ? route.routePlan
+                .map((s) => s?.swapInfo?.ammKey)
+                .filter((x) => typeof x === "string" && x.length > 0)
+            : [];
+        } catch {
+          lastAmmKeys = [];
+        }
+        // Best-effort: if we don't have lpSig yet, try a quick local scan
+        if (!lpSig) {
+          try {
+            const quickBudget = Number(process.env.LP_SIG_QUICK_SCAN_BUDGET_MS || 1500);
+            const quick = await Promise.race([
+              findLikelyLpSignature({ mint58: canonicalMint, route }),
+              new Promise((resolve) => setTimeout(() => resolve(null), quickBudget)),
+            ]);
+            if (quick) {
+              lpSig = quick;
+              try {
+                addTradeLog(chatId, {
+                  kind: "telemetry",
+                  mint: canonicalMint,
+                  stage: "lp_detected",
+                  lpSignature: quick,
+                  via: "scan_recent_sigs",
+                });
+              } catch {}
+            }
+          } catch {}
+        }
+        // Fallback: program-level scan if still not found
+        if (!lpSig) {
+          try {
+            const progBudget = Number(process.env.LP_SIG_PROGRAM_SCAN_BUDGET_MS || 1200);
+            const prog = await Promise.race([
+              findLpSigViaProgramScan({ mint58: canonicalMint }),
+              new Promise((resolve) => setTimeout(() => resolve(null), progBudget)),
+            ]);
+            if (prog) {
+              lpSig = prog;
+              try {
+                addTradeLog(chatId, {
+                  kind: "telemetry",
+                  mint: canonicalMint,
+                  stage: "lp_detected",
+                  lpSignature: prog,
+                  via: "program_scan",
+                });
+              } catch {}
+            }
+          } catch {}
+        }
+        const DISABLE_TOKEN_FALLBACK =
+          String(process.env.LP_SOLSCAN_DISABLE_TOKEN_FALLBACK || "true").toLowerCase() ===
+          "true";
+        const solscanLink = lpSig
+          ? `https://solscan.io/tx/${lpSig}`
+          : DISABLE_TOKEN_FALLBACK
+          ? ""
+          : `https://solscan.io/token/${canonicalMint}`;
+        const baseMsg = `💧 Liquidity detected for ${canonicalMint} — route live. outRaw=${outRaw} impact=${impact}%`;
+        console.log(solscanLink ? `${baseMsg} | Solscan: ${solscanLink}` : baseMsg);
+        // Emit a user-facing message with the LP transaction link if available
+        if (lpSig) {
+          onEvent?.(`💧 LP detected for ${canonicalMint}. Solscan tx: https://solscan.io/tx/${lpSig}`);
+        }
+        try {
+          addTradeLog(chatId, {
+            kind: "telemetry",
+            mint: canonicalMint,
+            stage: "liquidity_detected",
+            priceImpactPct: impact,
+            outAmount: outRaw,
+            at: routeFirstSeenAt,
+            attempt: attempts,
+            lpSignature: lpSig,
+            solscan: solscanLink,
+          });
+        } catch {}
+      }
+
       // Liquidity delta heuristic and guardrails (pre-empt launch readiness)
       if (LIQ_DELTA_ENABLED) {
         if (routeFirstSeenAt === null) routeFirstSeenAt = Date.now();
@@ -206,14 +597,14 @@ export function startLiquidityWatch(
         if (!probeRoute) {
           onEvent?.("Probe route unavailable yet, waiting...");
           try {
-              addTradeLog(chatId, {
-                kind: "telemetry",
-                mint: canonicalMint,
-                stage: "probe_check",
-                status: "unavailable",
-                attempt: attempts,
-                probeLamports,
-              });
+            addTradeLog(chatId, {
+              kind: "telemetry",
+              mint: canonicalMint,
+              stage: "probe_check",
+              status: "unavailable",
+              attempt: attempts,
+              probeLamports,
+            });
           } catch {}
           return;
         }
@@ -232,15 +623,15 @@ export function startLiquidityWatch(
             )}% > ${DELTA_MAX_PRICE_IMPACT_PCT}%. Waiting for more depth.`
           );
           try {
-          addTradeLog(chatId, {
-            kind: "telemetry",
-            mint: canonicalMint,
-            stage: "guardrail",
-            reason: "impact_exceeds_threshold",
-            priceImpactPct,
-            threshold: DELTA_MAX_PRICE_IMPACT_PCT,
-            attempt: attempts,
-          });
+            addTradeLog(chatId, {
+              kind: "telemetry",
+              mint: canonicalMint,
+              stage: "guardrail",
+              reason: "impact_exceeds_threshold",
+              priceImpactPct,
+              threshold: DELTA_MAX_PRICE_IMPACT_PCT,
+              attempt: attempts,
+            });
           } catch {}
           prevUnitOutProbe = unitOutProbe;
           return;
@@ -263,17 +654,17 @@ export function startLiquidityWatch(
               )}% < ${DELTA_MIN_IMPROV_PCT}% (age ${ageMs}ms). Waiting.`
             );
             try {
-          addTradeLog(chatId, {
-            kind: "telemetry",
-            mint: canonicalMint,
-            stage: "guardrail",
-            reason: "improv_below_threshold",
-            improvPct,
-            minImprovementPct: DELTA_MIN_IMPROV_PCT,
-            ageMs,
-            minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
-            attempt: attempts,
-          });
+              addTradeLog(chatId, {
+                kind: "telemetry",
+                mint: canonicalMint,
+                stage: "guardrail",
+                reason: "improv_below_threshold",
+                improvPct,
+                minImprovementPct: DELTA_MIN_IMPROV_PCT,
+                ageMs,
+                minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
+                attempt: attempts,
+              });
             } catch {}
             prevUnitOutProbe = unitOutProbe;
             return;
@@ -285,15 +676,15 @@ export function startLiquidityWatch(
               `Route age ${age}ms < ${DELTA_MIN_ROUTE_AGE_MS}ms. Waiting.`
             );
             try {
-          addTradeLog(chatId, {
-            kind: "telemetry",
-            mint: canonicalMint,
-            stage: "guardrail",
-            reason: "route_too_young",
-            ageMs: age,
-            minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
-            attempt: attempts,
-          });
+              addTradeLog(chatId, {
+                kind: "telemetry",
+                mint: canonicalMint,
+                stage: "guardrail",
+                reason: "route_too_young",
+                ageMs: age,
+                minRouteAgeMs: DELTA_MIN_ROUTE_AGE_MS,
+                attempt: attempts,
+              });
             } catch {}
             prevUnitOutProbe = unitOutProbe;
             return;
@@ -321,14 +712,14 @@ export function startLiquidityWatch(
             ts: Date.now(),
           });
           try {
-          addTradeLog(chatId, {
-            kind: "telemetry",
-            mint: canonicalMint,
-            stage: "delta_emitted",
-            unitOutProbe,
-            priceImpactPct,
-            attempt: attempts,
-          });
+            addTradeLog(chatId, {
+              kind: "telemetry",
+              mint: canonicalMint,
+              stage: "delta_emitted",
+              unitOutProbe,
+              priceImpactPct,
+              attempt: attempts,
+            });
           } catch {}
         } catch {}
       }
@@ -428,6 +819,29 @@ export function startLiquidityWatch(
       if (prio && attempts <= 3)
         prio = Math.floor(prio * (0.7 + 0.15 * (attempts - 1)));
 
+      // Optionally wait briefly until LP signature is captured before buying
+      const REQUIRE_LP_SIG_BEFORE_BUY =
+        String(process.env.REQUIRE_LP_SIG_BEFORE_BUY || "true").toLowerCase() ===
+        "true";
+      if (REQUIRE_LP_SIG_BEFORE_BUY && !lpSig) {
+        const waitMs = Number(process.env.LP_SIG_WAIT_MS || 800);
+        const startWait = Date.now();
+        while (!lpSig && Date.now() - startWait < waitMs) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        if (!lpSig) {
+          // Best effort: log that we’re proceeding without a captured LP signature
+          try {
+            addTradeLog(chatId, {
+              kind: "telemetry",
+              mint: canonicalMint,
+              stage: "lp_sig_wait_timeout",
+              waitMs,
+            });
+          } catch {}
+        }
+      }
+
       // Enforce fee reserve by dynamically reducing buy size if needed
       try {
         const bal = await getWalletBalance(chatId);
@@ -491,11 +905,10 @@ export function startLiquidityWatch(
       } catch {}
 
       if (!confirmedOk) {
-        const RETRY_ON_UNCONFIRMED_BUY = String(
-          process.env.RETRY_ON_UNCONFIRMED_BUY || ""
-        )
-          .toLowerCase()
-          .trim() === "true";
+        const RETRY_ON_UNCONFIRMED_BUY =
+          String(process.env.RETRY_ON_UNCONFIRMED_BUY || "")
+            .toLowerCase()
+            .trim() === "true";
         try {
           addTradeLog(chatId, {
             kind: "status",
@@ -510,12 +923,16 @@ export function startLiquidityWatch(
         } catch {}
         if (RETRY_ON_UNCONFIRMED_BUY) {
           onEvent?.(
-            `⚠️ Swap tx not confirmed (${failedConf ? "failed" : "timeout"}). Retrying... Tx: ${txid}`
+            `⚠️ Swap tx not confirmed (${
+              failedConf ? "failed" : "timeout"
+            }). Retrying... Tx: ${txid}`
           );
           throw new Error("tx_not_confirmed");
         } else {
           onEvent?.(
-            `⚠️ Swap tx not confirmed (${failedConf ? "failed" : "timeout"}). Stopping to avoid duplicate buys. Tx: ${txid}`
+            `⚠️ Swap tx not confirmed (${
+              failedConf ? "failed" : "timeout"
+            }). Stopping to avoid duplicate buys. Tx: ${txid}`
           );
           stopped = true;
           stopLiquidityWatch(chatId, canonicalMint);
@@ -558,18 +975,46 @@ export function startLiquidityWatch(
       // Arm Flash-LP guard immediately after buy
       try {
         const amtTokens = Number(swapRes?.output?.tokensOut ?? 0);
-        startFlashLpGuard(chatId, { mint: canonicalMint, amountTokens: amtTokens, onEvent });
+        startFlashLpGuard(chatId, {
+          mint: canonicalMint,
+          amountTokens: amtTokens,
+          onEvent,
+        });
+      } catch {}
+
+      // Arm Take-Profit guard to exit on upside spikes shortly after buy
+      try {
+        const amtTokens = Number(swapRes?.output?.tokensOut ?? 0);
+        startTakeProfitGuard(chatId, {
+          mint: canonicalMint,
+          amountTokens: amtTokens,
+          onEvent,
+        });
       } catch {}
 
       // Mark executed in the store before stopping the watcher
       markSnipeExecuted(chatId, canonicalMint, { txid }).catch(() => {});
 
+      // Cleanup logs subscriptions once we’ve bought or finished
+      try {
+        if (logsSubIds?.length) {
+          for (const id of logsSubIds) {
+            try {
+              await conn.removeOnLogsListener(id);
+            } catch {}
+          }
+          logsSubIds = [];
+        }
+      } catch {}
+
       stopLiquidityWatch(chatId, canonicalMint);
-  } catch (e) {
+    } catch (e) {
       // If a global buy lock is active, stop this watcher and cool off to avoid duplicates
       if (String(e?.message || "").includes("buy_locked")) {
         try {
-          onEvent?.("🔒 Buy lock active: another buy in-flight for this token. Stopping to avoid duplicates.");
+          onEvent?.(
+            "🔒 Buy lock active: another buy in-flight for this token. Stopping to avoid duplicates."
+          );
           stopped = true;
           stopLiquidityWatch(chatId, canonicalMint);
           const COOLDOWN_MS = Number(process.env.SNIPE_COOL_OFF_MS ?? 30000);
@@ -603,6 +1048,17 @@ export function startLiquidityWatch(
       // stop after too many attempts to avoid infinite loops
       if (attempts >= maxAttempts) {
         stopped = true;
+        // Cleanup logs subscriptions if stopping
+        try {
+          if (logsSubIds?.length) {
+            for (const id of logsSubIds) {
+              try {
+                await conn.removeOnLogsListener(id);
+              } catch {}
+            }
+            logsSubIds = [];
+          }
+        } catch {}
         stopLiquidityWatch(chatId, canonicalMint);
         onEvent?.(`Stopped watcher after ${attempts} attempts.`);
         try {

@@ -572,7 +572,7 @@ export function __resetRpcStateForTests() {
   lastRotationReason = null;
 }
 
-async function raceReadAcrossEndpoints({ callImpl, microBatch = 2 }) {
+async function raceReadAcrossEndpoints({ callImpl, microBatch = 2, timeoutMs, maxRetries } = {}) {
   const endpoints = listRpcEndpoints();
   const planned = await planOrderedEndpoints(endpoints);
   const ordered = planned.map((p) => p.url);
@@ -586,13 +586,20 @@ async function raceReadAcrossEndpoints({ callImpl, microBatch = 2 }) {
   let lastError;
 
   // Allow limited retries across all waves for transient failures
-  const maxRetries = Number.isFinite(READ_RACE_RETRIES) ? Math.max(0, READ_RACE_RETRIES) : 1;
+  const retries = Number.isFinite(maxRetries)
+    ? Math.max(0, maxRetries)
+    : Number.isFinite(READ_RACE_RETRIES)
+    ? Math.max(0, READ_RACE_RETRIES)
+    : 1;
 
-  for (let retry = 0; retry <= maxRetries; retry++) {
+  for (let retry = 0; retry <= retries; retry++) {
     for (let gi = 0; gi < groups.length; gi++) {
       const group = groups[gi];
       // Grow timeout per wave up to 3x to accommodate congested RPCs
-      const baseTimeout = READ_TIMEOUT_MS * Math.min(3, gi + 1);
+      const configuredTimeout = Number.isFinite(timeoutMs)
+        ? timeoutMs
+        : READ_TIMEOUT_MS;
+      const baseTimeout = configuredTimeout * Math.min(3, gi + 1);
 
       const attemptsInGroup = group.map((url, idx) => {
         const delayMs = idx * STAGGER_STEP_MS + Math.floor(Math.random() * 15);
@@ -624,8 +631,11 @@ async function raceReadAcrossEndpoints({ callImpl, microBatch = 2 }) {
 
     // If we got here, the whole pass failed; decide whether to retry
     const msg = String(lastError?.message || "").toLowerCase();
-    const isTransient = msg.includes("timeout") || msg.includes("bad gateway") || msg.includes("502");
-    if (retry < maxRetries && isTransient) {
+    const isTransient =
+      msg.includes("timeout") ||
+      msg.includes("bad gateway") ||
+      msg.includes("502");
+    if (retry < retries && isTransient) {
       // brief exponential backoff between retries
       const backoff = 100 + retry * 200;
       await sleep(backoff);
@@ -638,7 +648,9 @@ async function raceReadAcrossEndpoints({ callImpl, microBatch = 2 }) {
 }
 
 export function getDefaultReadMicroBatch() {
-  const s = Number(process.env.RPC_READ_MICRO_BATCH || process.env.READ_MICRO_BATCH || 2);
+  const s = Number(
+    process.env.RPC_READ_MICRO_BATCH || process.env.READ_MICRO_BATCH || 2
+  );
   return Number.isFinite(s) && s > 0 ? s : 2;
 }
 
@@ -701,10 +713,12 @@ export function mapStrategyToMicroBatch(strategy) {
 
 export async function getSignaturesForAddressRaced(
   address,
-  { commitment = "confirmed", options = {}, microBatch, callImpl } = {}
+  { commitment = "confirmed", options = {}, microBatch, callImpl, timeoutMs, maxRetries } = {}
 ) {
   return raceReadAcrossEndpoints({
     microBatch: microBatch || getDefaultReadMicroBatch(),
+    timeoutMs,
+    maxRetries,
     callImpl:
       callImpl ||
       (async (url) => {
@@ -721,10 +735,14 @@ export async function getTransactionRaced(
     maxSupportedTransactionVersion = 0,
     microBatch,
     callImpl,
+    timeoutMs,
+    maxRetries,
   } = {}
 ) {
   return raceReadAcrossEndpoints({
     microBatch: microBatch || getDefaultReadMicroBatch(),
+    timeoutMs,
+    maxRetries,
     callImpl:
       callImpl ||
       (async (url) => {

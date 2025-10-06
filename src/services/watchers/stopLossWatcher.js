@@ -1,9 +1,16 @@
 import { performSell } from "../trading/jupiter.js";
 import { getUserState } from "../userState.js";
 import { getQuoteRaw } from "../trading/jupiter.js";
-import { getWatchersPaused, getWatchersSlowMs, getPriorityFeeLamports, getUseJitoBundle } from "../config.js";
+import { getPositions } from "../positionStore.js";
+import {
+  getWatchersPaused,
+  getWatchersSlowMs,
+  getPriorityFeeLamports,
+  getUseJitoBundle,
+} from "../config.js";
 
 const watchers = new Map();
+const profitWatchers = new Map();
 
 // Canonicalize mint strings: extract a valid base58 public key (32–44 chars)
 function canonicalizeMint(mint) {
@@ -199,9 +206,11 @@ export async function checkStopLoss({
   baseSlippage = 100,
 }) {
   const canonicalMint = canonicalizeMint(mint);
-  const route = await probeQuote({ mint: canonicalMint, probeTokens, baseSlippage }).catch(
-    () => null
-  );
+  const route = await probeQuote({
+    mint: canonicalMint,
+    probeTokens,
+    baseSlippage,
+  }).catch(() => null);
   if (!route) return { triggered: false };
   const outAmount = Number(route.outAmount || 0);
   // price per token in lamports
@@ -235,6 +244,18 @@ export function startFlashLpGuard(
   let lastPrice = null;
   let noQuote = 0;
   let selling = false;
+  // Resolve entry/avg price from persistent position store (if available)
+  let baseAvgFlash = null;
+  try {
+    const positions = getPositions(chatId) || [];
+    const pos = positions.find(
+      (p) => p.mint === canonicalMint && Number(p.tokens) > 0
+    );
+    const avg = Number(
+      pos?.avgPriceSolPerToken ?? pos?.entryPriceSolPerToken ?? NaN
+    );
+    if (Number.isFinite(avg) && avg > 0) baseAvgFlash = avg;
+  } catch {}
 
   const sellAll = async (reason = "Flash LP guard: exiting...") => {
     try {
@@ -264,7 +285,11 @@ export function startFlashLpGuard(
           const isRateLimited = /429|rate/i.test(msg);
           if (attempt >= maxRetries || !isRateLimited) break;
           const waitMs = baseDelayMs * (attempt + 1);
-          onEvent?.(`Sell retry ${attempt + 1}/${maxRetries} after ${waitMs}ms (reason: ${msg.slice(0, 120)})`);
+          onEvent?.(
+            `Sell retry ${
+              attempt + 1
+            }/${maxRetries} after ${waitMs}ms (reason: ${msg.slice(0, 120)})`
+          );
           await new Promise((r) => setTimeout(r, waitMs));
           attempt += 1;
         }
@@ -281,6 +306,53 @@ export function startFlashLpGuard(
     if (!running) return;
     try {
       if (Date.now() >= endAt) {
+        try {
+          const forceExit =
+            String(process.env.FLASH_LP_FORCE_EXIT_ON_WINDOW_END || "")
+              .toLowerCase()
+              .trim() === "true";
+          const minProfitPct = Math.max(
+            0,
+            Number(process.env.FLASH_LP_MIN_PROFIT_PCT || 0)
+          );
+          if (forceExit) {
+            if (minProfitPct > 0 && baseAvgFlash) {
+              // Probe current price and ensure min profit before forced exit
+              const amt = Math.max(0, Number(amountTokens || 0));
+              const probeTokens = Math.max(0.000001, amt > 0 ? amt * 0.01 : 0.02);
+              const baseSlippage = 150;
+              const route = await probeQuote({
+                mint: canonicalMint,
+                probeTokens,
+                baseSlippage,
+                timeoutMs: 900,
+              }).catch(() => null);
+              if (route) {
+                const unitOut = Number(route.outAmount || 0) / 1e9 / probeTokens;
+                const gainPct = ((unitOut - baseAvgFlash) / baseAvgFlash) * 100;
+                if (Number.isFinite(gainPct) && gainPct >= minProfitPct) {
+                  await sellAll(
+                    `Flash-LP guard window ended: forced exit at +${gainPct.toFixed(
+                      1
+                    )}% (>= ${minProfitPct}%).`
+                  );
+                } else {
+                  onEvent?.(
+                    `Flash-LP guard window ended: no exit (gain ${gainPct.toFixed(
+                      1
+                    )}% < ${minProfitPct}%).`
+                  );
+                }
+              } else {
+                onEvent?.(
+                  "Flash-LP guard window ended: probe unavailable; skipping forced exit."
+                );
+              }
+            } else {
+              await sellAll("Flash-LP guard window ended: forced exit.");
+            }
+          }
+        } catch {}
         stopFlashLpGuard(chatId, mint);
         onEvent?.("Flash-LP guard window ended.");
         return;
@@ -293,13 +365,23 @@ export function startFlashLpGuard(
       if (slowMs > 0) await new Promise((r) => setTimeout(r, slowMs));
 
       const amt = Math.max(0, Number(amountTokens || 0));
-      const smallProbe = Math.max(0.000001, (amt > 0 ? amt * 0.005 : 0.01));
-      const largeProbe = Math.max(smallProbe * 4, (amt > 0 ? amt * 0.02 : 0.04));
+      const smallProbe = Math.max(0.000001, amt > 0 ? amt * 0.005 : 0.01);
+      const largeProbe = Math.max(smallProbe * 4, amt > 0 ? amt * 0.02 : 0.04);
       const baseSlippage = 150;
 
       // Probe sequentially to reduce bursty rate-limits under stress
-      const routeSmall = await probeQuote({ mint: canonicalMint, probeTokens: smallProbe, baseSlippage, timeoutMs: 900 }).catch(() => null);
-      const routeLarge = await probeQuote({ mint: canonicalMint, probeTokens: largeProbe, baseSlippage, timeoutMs: 900 }).catch(() => null);
+      const routeSmall = await probeQuote({
+        mint: canonicalMint,
+        probeTokens: smallProbe,
+        baseSlippage,
+        timeoutMs: 900,
+      }).catch(() => null);
+      const routeLarge = await probeQuote({
+        mint: canonicalMint,
+        probeTokens: largeProbe,
+        baseSlippage,
+        timeoutMs: 900,
+      }).catch(() => null);
 
       if (!routeSmall && !routeLarge) {
         noQuote += 1;
@@ -313,12 +395,16 @@ export function startFlashLpGuard(
       noQuote = 0;
 
       const priceNow = routeSmall
-        ? (Number(routeSmall.outAmount || 0) / 1e9) / smallProbe
+        ? Number(routeSmall.outAmount || 0) / 1e9 / smallProbe
         : routeLarge
-        ? (Number(routeLarge.outAmount || 0) / 1e9) / largeProbe
+        ? Number(routeLarge.outAmount || 0) / 1e9 / largeProbe
         : null;
 
-      if (lastPrice && priceNow && priceNow < lastPrice * (1 - cliffDropPct / 100)) {
+      if (
+        lastPrice &&
+        priceNow &&
+        priceNow < lastPrice * (1 - cliffDropPct / 100)
+      ) {
         await sellAll(`Cliff drop >${cliffDropPct}% detected. Exiting...`);
         stopFlashLpGuard(chatId, canonicalMint);
         return;
@@ -328,15 +414,19 @@ export function startFlashLpGuard(
       // Extreme impact on larger probe implies shallow/vanishing LP
       const impactLarge = Number(routeLarge?.priceImpactPct ?? 0);
       if (impactLarge >= impactExitPct) {
-        await sellAll(`Extreme price impact (${impactLarge.toFixed(1)}%). Exiting...`);
+        await sellAll(
+          `Extreme price impact (${impactLarge.toFixed(1)}%). Exiting...`
+        );
         stopFlashLpGuard(chatId, canonicalMint);
         return;
       }
 
       // Disproportionate slippage between small and large probes
       if (routeSmall && routeLarge) {
-        const unitOutSmall = (Number(routeSmall.outAmount || 0) / 1e9) / smallProbe;
-        const unitOutLarge = (Number(routeLarge.outAmount || 0) / 1e9) / largeProbe;
+        const unitOutSmall =
+          Number(routeSmall.outAmount || 0) / 1e9 / smallProbe;
+        const unitOutLarge =
+          Number(routeLarge.outAmount || 0) / 1e9 / largeProbe;
         if (Number.isFinite(unitOutSmall) && Number.isFinite(unitOutLarge)) {
           const ratio = unitOutLarge / Math.max(1e-9, unitOutSmall);
           if (ratio < 0.5) {
@@ -356,7 +446,11 @@ export function startFlashLpGuard(
   flashWatchers.set(k, () => {
     running = false;
   });
-  onEvent?.(`Flash-LP guard armed for ${canonicalMint} (window ${(windowMs / 1000) | 0}s)`);
+  onEvent?.(
+    `Flash-LP guard armed for ${canonicalMint} (window ${
+      (windowMs / 1000) | 0
+    }s)`
+  );
   loop();
 }
 
@@ -366,4 +460,185 @@ export function stopFlashLpGuard(chatId, mint) {
   const stop = flashWatchers.get(k);
   if (stop) stop();
   flashWatchers.delete(k);
+}
+
+// --- Take-Profit Guard: Exit on upside spike relative to entry/avg price ---
+export function startTakeProfitGuard(
+  chatId,
+  {
+    mint,
+    amountTokens,
+    windowMs = Number(process.env.TAKE_PROFIT_WINDOW_MS || 60000),
+    pollMs = Number(process.env.TAKE_PROFIT_POLL_MS || 300),
+    profitPct = Number(process.env.TAKE_PROFIT_PCT || 20),
+    sellPct = Number(process.env.TAKE_PROFIT_SELL_PCT || 100),
+    onEvent,
+  }
+) {
+  const canonicalMint = canonicalizeMint(mint);
+  const k = `tp:${chatId}:${canonicalMint}`;
+  if (profitWatchers.has(k)) return;
+  let running = true;
+  const endAt = Date.now() + Math.max(5000, windowMs);
+
+  // Resolve entry/avg price from persistent position store
+  let baseAvg = null;
+  try {
+    const positions = getPositions(chatId) || [];
+    const pos = positions.find(
+      (p) => p.mint === canonicalMint && Number(p.tokens) > 0
+    );
+    const avg = Number(
+      pos?.avgPriceSolPerToken ?? pos?.entryPriceSolPerToken ?? NaN
+    );
+    if (Number.isFinite(avg) && avg > 0) baseAvg = avg;
+  } catch {}
+  if (!baseAvg) {
+    onEvent?.("Take-profit guard: no avg price available. Skipping.");
+    return;
+  }
+
+  const clampPct = (n) => Math.max(1, Math.min(200, Number(n)));
+  const targetPct = clampPct(profitPct);
+  const sellPercent = Math.max(1, Math.min(100, Number(sellPct)));
+
+  let fired = false;
+
+  const stopFn = () => {
+    running = false;
+  };
+  profitWatchers.set(k, stopFn);
+
+  const loop = async () => {
+    if (!running) return;
+    try {
+      if (Date.now() >= endAt) {
+        // Optional forced exit at window end, gated by minimum profitability
+        try {
+          const forceExit =
+            String(process.env.TAKE_PROFIT_FORCE_EXIT_ON_WINDOW_END || "")
+              .toLowerCase()
+              .trim() === "true";
+          const minProfitPct = Math.max(
+            0,
+            Number(process.env.TAKE_PROFIT_MIN_PROFIT_PCT || 0)
+          );
+          if (forceExit) {
+            const amt = Math.max(0, Number(amountTokens || 0));
+            const probeTokens = Math.max(0.000001, amt > 0 ? amt * 0.01 : 0.02);
+            const baseSlippage = 150;
+            const route = await probeQuote({
+              mint: canonicalMint,
+              probeTokens,
+              baseSlippage,
+              timeoutMs: 900,
+            }).catch(() => null);
+            if (route) {
+              const unitOut = Number(route.outAmount || 0) / 1e9 / probeTokens;
+              const gainPct = ((unitOut - baseAvg) / baseAvg) * 100;
+              if (Number.isFinite(gainPct) && gainPct >= minProfitPct) {
+                try {
+                  const { txid } = await performSell({
+                    tokenMint: canonicalMint,
+                    percent: Math.max(1, Math.min(100, Number(sellPct))),
+                    slippageBps: Number(
+                      process.env.TAKE_PROFIT_EXIT_SLIPPAGE_BPS || 250
+                    ),
+                    priorityFeeLamports: getPriorityFeeLamports(),
+                    useJitoBundle: getUseJitoBundle(),
+                    chatId,
+                  });
+                  onEvent?.(
+                    `Take-profit window ended: forced exit at +${gainPct.toFixed(
+                      1
+                    )}% (>= ${minProfitPct}%). Tx: ${txid}`
+                  );
+                } catch (e) {
+                  onEvent?.(
+                    `Take-profit forced exit failed: ${e?.message || e}`
+                  );
+                }
+              } else {
+                onEvent?.(
+                  `Take-profit window ended: no exit (gain ${gainPct.toFixed(
+                    1
+                  )}% < ${minProfitPct}%).`
+                );
+              }
+            }
+          }
+        } catch {}
+        stopTakeProfitGuard(chatId, canonicalMint);
+        onEvent?.("Take-profit guard window ended.");
+        return;
+      }
+      if (getWatchersPaused()) {
+        onEvent?.("Watchers paused by config. Skipping take-profit guard.");
+        return;
+      }
+      const slowMs = getWatchersSlowMs();
+      if (slowMs > 0) await new Promise((r) => setTimeout(r, slowMs));
+
+      const amt = Math.max(0, Number(amountTokens || 0));
+      const probeTokens = Math.max(0.000001, amt > 0 ? amt * 0.01 : 0.02);
+      const baseSlippage = 150;
+
+      const route = await probeQuote({
+        mint: canonicalMint,
+        probeTokens,
+        baseSlippage,
+        timeoutMs: 900,
+      }).catch(() => null);
+
+      if (!route) return; // transient; try next tick
+
+      const unitOut = Number(route.outAmount || 0) / 1e9 / probeTokens;
+      if (!Number.isFinite(unitOut) || unitOut <= 0) return;
+
+      const gainPct = ((unitOut - baseAvg) / baseAvg) * 100;
+      if (!fired && gainPct >= targetPct) {
+        fired = true;
+        onEvent?.(
+          `Take-profit hit: +${gainPct.toFixed(
+            1
+          )}% >= ${targetPct}%. Selling ${sellPercent}%…`
+        );
+        try {
+          const { txid } = await performSell({
+            tokenMint: canonicalMint,
+            percent: sellPercent,
+            slippageBps: Number(
+              process.env.TAKE_PROFIT_EXIT_SLIPPAGE_BPS || 250
+            ),
+            priorityFeeLamports: getPriorityFeeLamports(),
+            useJitoBundle: getUseJitoBundle(),
+            chatId,
+          });
+          onEvent?.(`Sold on take-profit. Tx: ${txid}`);
+        } catch (e) {
+          onEvent?.(`Take-profit sell failed: ${e?.message || e}`);
+        }
+        stopTakeProfitGuard(chatId, canonicalMint);
+        return;
+      }
+    } catch {
+    } finally {
+      if (running) setTimeout(loop, pollMs);
+    }
+  };
+
+  onEvent?.(
+    `Take-profit guard armed for ${canonicalMint} (+${targetPct}% within ${
+      (windowMs / 1000) | 0
+    }s)`
+  );
+  loop();
+}
+
+export function stopTakeProfitGuard(chatId, mint) {
+  const canonicalMint = canonicalizeMint(mint);
+  const k = `tp:${chatId}:${canonicalMint}`;
+  const stop = profitWatchers.get(k);
+  if (stop) stop();
+  profitWatchers.delete(k);
 }

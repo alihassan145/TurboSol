@@ -174,6 +174,7 @@ function buildMainMenu(chatId) {
 async function buildTurboSolWelcomeMessage(chatId) {
   if (await hasUserWallet(chatId)) {
     const info = await getWalletInfo(chatId);
+    const summary = await getUnrealizedPnlSummary(chatId).catch(() => null);
     const timestamp = new Date().toLocaleTimeString("en-GB", {
       hour12: false,
       hour: "2-digit",
@@ -190,7 +191,29 @@ async function buildTurboSolWelcomeMessage(chatId) {
         ? "🟢 Your wallet is funded and ready for trading!"
         : "🔴 You currently have no SOL in your wallet.\nTo start trading, please deposit SOL to your address.";
 
-    return `🚀 Welcome to TurboSol!\n\nYour Solana Wallet:\n\n→ W1: ${info.address}\nBalance: ${solText} SOL (USD $${info.usdBalance})\n\n${balanceStatus}\n\n🕒 Last updated: ${timestamp}`;
+    const pnlLines = (() => {
+      if (!summary) return "";
+      const header = `\n\n📈 PnL Summary (Unrealized)\nExposure: ${
+        summary.exposureSol?.toFixed?.(4) ?? "?"
+      } SOL\nPnL: ${summary.unrealizedPnlSol?.toFixed?.(4) ?? "?"} SOL`;
+      const positions = Array.isArray(summary.positions)
+        ? summary.positions.slice(0, 5).map((p, i) => {
+            const upDown = Number(p.unrealizedPnlSol || 0) >= 0 ? "🟢" : "🔴";
+            const pnl = Number(p.unrealizedPnlSol || 0).toFixed(4);
+            const exp = Number(p.exposureSol || 0).toFixed(4);
+            const sym = p.symbol || (p.mint ? p.mint.slice(0, 4) + "…" : "?");
+            return `${
+              i + 1
+            }. ${upDown} ${sym} • Exp ${exp} SOL • PnL ${pnl} SOL`;
+          })
+        : [];
+      const body = positions.length
+        ? `\n${positions.join("\n")}`
+        : "\nNo open positions.";
+      return `${header}${body}`;
+    })();
+
+    return `🚀 Welcome to TurboSol!\n\nYour Solana Wallet:\n\n→ W1: ${info.address}\nBalance: ${solText} SOL (USD $${info.usdBalance})\n\n${balanceStatus}${pnlLines}\n\n🕒 Last updated: ${timestamp}`;
   }
   return `🚀 Welcome to TurboSol!\n\n🔴 No wallet linked to your account.\n\nUse /setup to generate a new wallet or /import <privateKeyBase58> to import an existing one.`;
 }
@@ -439,14 +462,19 @@ export async function startTelegramBot() {
         unrealizedPnlSol = 0,
         positions = [],
       } = summary;
-      const header = `📊 PnL Summary\n• Exposure: ${totalExposureSol.toFixed(4)} SOL\n• Unrealized: ${unrealizedPnlSol.toFixed(4)} SOL`;
+      const header = `📊 PnL Summary\n• Exposure: ${totalExposureSol.toFixed(
+        4
+      )} SOL\n• Unrealized: ${unrealizedPnlSol.toFixed(4)} SOL`;
       const lines = positions.slice(0, 10).map((p) => {
         const ux = Number(p?.unrealized?.pnlSol || 0);
         const ex = Number(p?.exposureSol || 0);
         const mint = String(p?.mint || "?");
-        return `• ${mint.slice(0, 6)}…: Ex ${ex.toFixed(4)} | U ${ux.toFixed(4)} SOL`;
+        return `• ${mint.slice(0, 6)}…: Ex ${ex.toFixed(4)} | U ${ux.toFixed(
+          4
+        )} SOL`;
       });
-      const more = positions.length > 10 ? `\n… ${positions.length - 10} more` : "";
+      const more =
+        positions.length > 10 ? `\n… ${positions.length - 10} more` : "";
       await bot.sendMessage(chatId, `${header}\n${lines.join("\n")}${more}`);
     } catch (e) {
       try {
@@ -3289,7 +3317,10 @@ export async function startTelegramBot() {
             return;
           }
           const ownerStr = acct.owner?.toBase58?.() || "";
-          if (ownerStr !== TOKEN_PROGRAM_ID && ownerStr !== TOKEN_2022_PROGRAM_ID) {
+          if (
+            ownerStr !== TOKEN_PROGRAM_ID &&
+            ownerStr !== TOKEN_2022_PROGRAM_ID
+          ) {
             await bot.sendMessage(
               chatId,
               "❌ Address is not a SPL token mint.\nSend the mint address of the token you want to snipe."

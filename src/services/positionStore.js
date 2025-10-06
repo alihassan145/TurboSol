@@ -62,7 +62,8 @@ export function upsertPosition({
     const wasZero = (p.tokens || 0) <= 0;
     const newTokens = p.tokens + toks;
     const newCostSol = p.avgPriceSolPerToken * p.tokens + sol;
-    const newAvg = newTokens > 0 ? newCostSol / newTokens : p.avgPriceSolPerToken;
+    const newAvg =
+      newTokens > 0 ? newCostSol / newTokens : p.avgPriceSolPerToken;
     p.tokens = newTokens;
     p.avgPriceSolPerToken = newAvg;
     p.feesLamports = Number(p.feesLamports || 0) + Number(feesLamports || 0);

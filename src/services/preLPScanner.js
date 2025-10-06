@@ -453,6 +453,7 @@ export async function startPreLPWatch(chatId, { onEvent, onSnipeEvent, autoSnipe
         retryCount,
         source: 'watch:prelp',
         signalType: 'pre_lp_detected',
+        lpSignature: details?.signature,
         onEvent: (m) => { try { onSnipeEvent?.(mint, m); } catch {} },
       });
     } catch {}

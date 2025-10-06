@@ -207,7 +207,25 @@ class AlphaDetection extends EventEmitter {
       try {
         const signatures = await getSignaturesForAddressRaced(
           new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
-          { options: { limit: Number(process.env.MEMPOOL_SIG_LIMIT || 30) } }
+          {
+            options: { limit: Number(process.env.MEMPOOL_SIG_LIMIT || 30) },
+            microBatch: Number(
+              process.env.MEMPOOL_READ_MICRO_BATCH ||
+                process.env.RPC_READ_MICRO_BATCH ||
+                process.env.READ_MICRO_BATCH ||
+                3
+            ),
+            timeoutMs: Number(
+              process.env.MEMPOOL_READ_TIMEOUT_MS ||
+                process.env.RPC_READ_TIMEOUT_MS ||
+                12000
+            ),
+            maxRetries: Number(
+              process.env.MEMPOOL_READ_RACE_RETRIES ||
+                process.env.RPC_READ_RACE_RETRIES ||
+                2
+            ),
+          }
         );
 
         for (const sig of signatures) {
@@ -217,6 +235,23 @@ class AlphaDetection extends EventEmitter {
             const tx = await getTransactionRaced(sig.signature, {
               commitment: "confirmed",
               maxSupportedTransactionVersion: 0,
+              // Use a slightly higher micro-batch for robustness during mempool scans
+              microBatch: Number(
+                process.env.MEMPOOL_READ_MICRO_BATCH ||
+                  process.env.RPC_READ_MICRO_BATCH ||
+                  process.env.READ_MICRO_BATCH ||
+                  3
+              ),
+              timeoutMs: Number(
+                process.env.MEMPOOL_READ_TIMEOUT_MS ||
+                  process.env.RPC_READ_TIMEOUT_MS ||
+                  12000
+              ),
+              maxRetries: Number(
+                process.env.MEMPOOL_READ_RACE_RETRIES ||
+                  process.env.RPC_READ_RACE_RETRIES ||
+                  2
+              ),
             });
 
             if (tx && this.isPreLPActivity(tx)) {
@@ -230,12 +265,21 @@ class AlphaDetection extends EventEmitter {
             }
           } catch (txError) {
             // Log individual transaction errors but continue processing
-            if (txError.message.includes("Transaction version")) {
+            const msg = String(txError?.message || "").toLowerCase();
+            if (msg.includes("transaction version")) {
               console.warn(
                 `⚠️ Transaction version error for ${sig.signature}: ${txError.message}`
               );
-            } else if (txError.message.includes("not found")) {
-              // Transaction not found is common for recent signatures, skip silently
+            } else if (
+              msg.includes("not found") ||
+              msg.includes("read_timeout") ||
+              msg.includes("timeout") ||
+              msg.includes("fetch failed") ||
+              msg.includes("429") ||
+              msg.includes("bad gateway") ||
+              msg.includes("502")
+            ) {
+              // Common transient/read race failures during fresh mempool scans; skip noisy logging
             } else {
               console.warn(
                 `⚠️ Failed to fetch transaction ${sig.signature}: ${txError.message}`
@@ -247,7 +291,12 @@ class AlphaDetection extends EventEmitter {
           this.seenTokenProgramSigs.add(sig.signature);
         }
       } catch (error) {
-        console.error("❌ Mempool scanner error:", error.message);
+        const msg = String(error?.message || "").toLowerCase();
+        if (msg.includes("read_timeout") || msg.includes("timeout")) {
+          // Transient timeout across endpoints; avoid elevating to error-level noise
+        } else {
+          console.error("❌ Mempool scanner error:", error.message);
+        }
       }
     }, 1500);
   }

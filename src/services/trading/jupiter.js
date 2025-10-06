@@ -12,16 +12,57 @@ import { initTrade, updateTradeStatus } from "../tradeState.js";
 import { monitorSignatures } from "../signatureMonitor.js";
 import { upsertPosition, applySellToPosition } from "../positionStore.js";
 import { recordPnlSnapshot } from "../positionStore.js";
-import { getUserState } from "../userState.js";
+import { getUserState, addPosition } from "../userState.js";
 
 export const NATIVE_SOL = "So11111111111111111111111111111111111111112";
-const JUP_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote";
-const JUP_SWAP_URL = "https://lite-api.jup.ag/swap/v1/swap";
+
+// Choose Jupiter API base by tier; use Pro if API key present
+const _useProApi =
+  !!process.env.JUP_API_KEY ||
+  String(process.env.JUP_API_TIER || "").toLowerCase() === "pro";
+const JUP_BASE_URL = _useProApi
+  ? "https://api.jup.ag"
+  : "https://lite-api.jup.ag";
+const JUP_QUOTE_URL = `${JUP_BASE_URL}/swap/v1/quote`;
+const JUP_SWAP_URL = `${JUP_BASE_URL}/swap/v1/swap`;
+
+function getJupHeaders() {
+  const key = process.env.JUP_API_KEY;
+  if (_useProApi && key) {
+    return {
+      // Jupiter accepts API key; include both common header forms for compatibility
+      Authorization: `Bearer ${key}`,
+      "x-api-key": key,
+      Accept: "application/json",
+    };
+  }
+  return { Accept: "application/json" };
+}
 
 const mintDecimalsCache = new Map();
 
 // Global buy locks to prevent concurrent duplicate buys across sources (per chatId+mint)
 const _buyLocks = new Map(); // key: `${chatId}:${mint}` -> expiresAt (ms)
+
+// Global swap-build queue (Lite tier friendly): process one build at a time
+const _buildQueue = { busy: false, waiters: [] };
+function acquireBuildSlot() {
+  if (!_buildQueue.busy) {
+    _buildQueue.busy = true;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => _buildQueue.waiters.push(resolve));
+}
+function releaseBuildSlot() {
+  const next = _buildQueue.waiters.shift();
+  if (next) {
+    // Keep busy while handing off to next waiter
+    next();
+  } else {
+    _buildQueue.busy = false;
+  }
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Canonicalize mint strings: extract a valid base58 public key (32–44 chars)
 function canonicalizeMint(mint) {
@@ -115,6 +156,7 @@ export async function getQuoteRaw({
     axios.get(JUP_QUOTE_URL, {
       params,
       timeout: timeoutMs,
+      headers: getJupHeaders(),
       validateStatus: (s) => s >= 200 && s < 500,
     }),
     timeoutMs,
@@ -269,18 +311,48 @@ async function buildAndSignSwapTx({
       },
     },
   };
-  const res = await axios.post(JUP_SWAP_URL, body, {
-    timeout: Number(process.env.SWAP_BUILD_TIMEOUT_MS || 5000),
-    validateStatus: (s) => s >= 200 && s < 500,
-  });
-  if (res.status >= 400) {
-    const msg = res?.data?.error || `swap_build_error_${res.status}`;
-    throw new Error(msg);
+  const timeoutMs = Number(process.env.SWAP_BUILD_TIMEOUT_MS || 5000);
+  const maxRetries = Number(
+    process.env.SWAP_BUILD_MAX_RETRIES || (_useProApi ? 6 : 4)
+  );
+  const baseDefault = _useProApi ? 250 : 750;
+  const baseDelay = Number(process.env.SWAP_BUILD_BASE_DELAY_MS || baseDefault);
+  const jitterMs = Number(process.env.SWAP_BUILD_JITTER_MS || 150);
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    await acquireBuildSlot();
+    try {
+      const res = await axios.post(JUP_SWAP_URL, body, {
+        timeout: timeoutMs,
+        headers: getJupHeaders(),
+        validateStatus: (s) => s >= 200 && s < 500,
+      });
+      if (res.status >= 400) {
+        const msg = res?.data?.error || `swap_build_error_${res.status}`;
+        const is429 = res.status === 429 || String(msg).includes("429");
+        if (is429 && attempt < maxRetries) {
+          const delay =
+            baseDelay * Math.pow(2, attempt - 1) +
+            Math.floor(Math.random() * jitterMs);
+          // Release slot and wait before next attempt to respect Lite sliding window
+          releaseBuildSlot();
+          await sleep(delay);
+          continue;
+        }
+        throw new Error(msg);
+      }
+      const swapTxB64 = res?.data?.swapTransaction;
+      if (!swapTxB64) throw new Error("no_swap_transaction");
+      const tx = VersionedTransaction.deserialize(
+        Buffer.from(swapTxB64, "base64")
+      );
+      return tx;
+    } finally {
+      // Ensure next queued build can proceed
+      releaseBuildSlot();
+    }
   }
-  const swapTxB64 = res?.data?.swapTransaction;
-  if (!swapTxB64) throw new Error("no_swap_transaction");
-  const tx = VersionedTransaction.deserialize(Buffer.from(swapTxB64, "base64"));
-  return tx;
+  throw new Error("swap_build_error_exhausted_429");
 }
 
 export async function performSwap({
@@ -332,8 +404,25 @@ export async function performSwap({
   const route = quoteRes?.route || null;
   if (!route) throw new Error("no_quote_route");
 
+  // Safety: ensure essential fields exist; if not, refetch a fresh quote
+  if (!route?.inputMint || !route?.outputMint) {
+    const amountRaw = Math.floor(Number(amountSol || 0) * 1e9);
+    const refetched = await getQuoteRaw({
+      inputMint,
+      outputMint,
+      amountRaw,
+      slippageBps,
+    }).catch(() => null);
+    if (refetched && !refetched.__error__) {
+      quoteRes.route = refetched;
+    } else {
+      throw new Error("invalid_quote_response_missing_mints");
+    }
+  }
+
   // Prevent concurrent duplicate buys across multiple sources by enforcing a global per-chat+mint lock
-  const isSolToToken = String(inputMint) === NATIVE_SOL && !!outputMint && chatId != null;
+  const isSolToToken =
+    String(inputMint) === NATIVE_SOL && !!outputMint && chatId != null;
   let lockAcquired = false;
   if (isSolToToken) {
     if (isBuyLocked(chatId, outputMint)) {
@@ -344,7 +433,9 @@ export async function performSwap({
   }
 
   // Pre-compute expected tokens out for trade state
-  const outDecPre = await getMintDecimals(outputMint, connection).catch(() => 6);
+  const outDecPre = await getMintDecimals(outputMint, connection).catch(
+    () => 6
+  );
   const tokensOutExpected = Number(route?.outAmount)
     ? Number(route.outAmount) / 10 ** outDecPre
     : null;
@@ -391,7 +482,9 @@ export async function performSwap({
     } catch {}
     // Release buy lock on immediate send/build failure
     if (lockAcquired) {
-      try { releaseBuyLock(chatId, outputMint); } catch {}
+      try {
+        releaseBuyLock(chatId, outputMint);
+      } catch {}
     }
     throw e;
   }
@@ -412,8 +505,42 @@ export async function performSwap({
   const txid = sendRes?.txid || null;
   // If send produced no txid, release the buy lock to allow retry
   if (!txid && lockAcquired) {
-    try { releaseBuyLock(chatId, outputMint); } catch {}
+    try {
+      releaseBuyLock(chatId, outputMint);
+    } catch {}
   }
+  // Provisional persistence: ensure a position exists immediately after send
+  // so that any protective sells (e.g., Flash-LP guard) can properly update
+  // realized PnL even if the buy confirmation is delayed.
+  try {
+    if (txid) {
+      upsertPosition({
+        chatId,
+        wallet:
+          wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+        mint: outputMint,
+        tokensAdded: Number(tokensOut || 0),
+        solSpent: Number(amountSol || 0),
+        feesLamports: Number(effectivePriorityFeeLamports || 0),
+      });
+      // Reflect in in-memory UI state immediately for Positions/PnL views
+      addPosition(chatId, {
+        mint: outputMint,
+        tokensOut: Number(tokensOut || 0),
+        solIn: Number(amountSol || 0),
+        txid,
+      });
+      recordPnlSnapshot(chatId, {
+        kind: "buy_pending",
+        mint: outputMint,
+        wallet:
+          wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+        tokens: Number(tokensOut || 0),
+        sol: Number(amountSol || 0),
+        feesLamports: Number(effectivePriorityFeeLamports || 0),
+      });
+    }
+  } catch {}
   try {
     updateTradeStatus(tk, "pending", { txid, confirmations: 0 });
     // Monitor confirmation and update position store on success
@@ -428,16 +555,27 @@ export async function performSwap({
           try {
             upsertPosition({
               chatId,
-              wallet: wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+              wallet:
+                wallet.publicKey?.toBase58?.() ||
+                wallet.publicKey?.toString?.(),
               mint: outputMint,
               tokensAdded: Number(trade?.tokens || tokensOut || 0),
               solSpent: Number(amountSol || 0),
               feesLamports: Number(effectivePriorityFeeLamports || 0),
             });
+            // Also reflect position in in-memory UI state so Positions/PnL views show immediately
+            addPosition(chatId, {
+              mint: outputMint,
+              tokensOut: Number(trade?.tokens || tokensOut || 0),
+              solIn: Number(amountSol || 0),
+              txid,
+            });
             recordPnlSnapshot(chatId, {
               kind: "buy",
               mint: outputMint,
-              wallet: wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+              wallet:
+                wallet.publicKey?.toBase58?.() ||
+                wallet.publicKey?.toString?.(),
               tokens: Number(trade?.tokens || tokensOut || 0),
               sol: Number(amountSol || 0),
               feesLamports: Number(effectivePriorityFeeLamports || 0),
@@ -506,13 +644,32 @@ export async function quickSell({
     : await getAdaptiveSlippageBps().catch(() =>
         Number(process.env.DEFAULT_SLIPPAGE_BPS || 100)
       );
-  const route = await getQuoteRaw({
+  let route = await getQuoteRaw({
     inputMint: tokenMint,
     outputMint: NATIVE_SOL,
     amountRaw: Number(sellRaw),
     slippageBps,
   }).catch(() => null);
+  // Normalize error-shaped responses from quote calls
+  if (route && route.__error__) {
+    const code = route.errorCode || "quote_error";
+    const msg = route.errorMessage || "no_quote_route";
+    throw new Error(`${code}:${msg}`);
+  }
   if (!route) throw new Error("no_quote_route");
+
+  // Safety: ensure essential fields exist; if not, refetch a fresh quote
+  if (!route?.inputMint || !route?.outputMint) {
+    route = await getQuoteRaw({
+      inputMint: tokenMint,
+      outputMint: NATIVE_SOL,
+      amountRaw: Number(sellRaw),
+      slippageBps,
+    }).catch(() => null);
+    if (!route?.inputMint || !route?.outputMint) {
+      throw new Error("invalid_quote_response_missing_mints");
+    }
+  }
 
   const tk = tradeKey || `${String(chatId)}:${tokenMint}:${Date.now()}`;
   try {
@@ -600,7 +757,9 @@ export async function quickSell({
           try {
             applySellToPosition({
               chatId,
-              wallet: wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+              wallet:
+                wallet.publicKey?.toBase58?.() ||
+                wallet.publicKey?.toString?.(),
               mint: tokenMint,
               tokensSold: Number(tokensSold || 0),
               solReceived: Number(tokensOut || 0),
@@ -609,7 +768,9 @@ export async function quickSell({
             recordPnlSnapshot(chatId, {
               kind: "sell",
               mint: tokenMint,
-              wallet: wallet.publicKey?.toBase58?.() || wallet.publicKey?.toString?.(),
+              wallet:
+                wallet.publicKey?.toBase58?.() ||
+                wallet.publicKey?.toString?.(),
               tokens: Number(tokensSold || 0),
               sol: Number(tokensOut || 0),
               feesLamports: Number(effectivePriorityFeeLamports || 0),

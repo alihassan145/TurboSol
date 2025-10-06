@@ -24,7 +24,7 @@ export async function startPumpFunListener(
       continue; // skip invalid keys
     }
     const subId = conn.onLogs(
-      { mentions: [programKey.toBase58()] },
+      programKey,
       (logs, ctx) => {
         try {
           // Heuristic: detect create/init events and emit as alpha; upstream can decide to snipe

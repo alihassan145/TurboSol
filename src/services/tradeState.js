@@ -71,7 +71,8 @@ export function updateTradeStatus(tradeKey, status, info = {}) {
       appendTrade(String(updated.chatId), {
         kind: updated.side,
         mint: updated.mint,
-        sol: updated.side === "buy" ? Number(updated.amountSol ?? 0) : undefined,
+        sol:
+          updated.side === "buy" ? Number(updated.amountSol ?? 0) : undefined,
         tokens:
           updated.side === "sell" ? Number(updated.tokens ?? 0) : undefined,
         slippageBps: updated.slippageBps,

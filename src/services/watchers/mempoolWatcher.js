@@ -20,7 +20,7 @@ export async function startMempoolWatch(
       continue;
     }
     const subId = conn.onLogs(
-      { mentions: [programKey.toBase58()] },
+      programKey,
       async (logs, ctx) => {
         try {
           onEvent?.({ programId: pid, logs });
@@ -29,7 +29,14 @@ export async function startMempoolWatch(
           if (autoSnipeOnLPEvents && (await shouldTriggerAutoSnipe(chatId))) {
             const mint = extractMintFromLogs(logs);
             if (mint && (await isLPEvent(logs))) {
-              await triggerAutoSnipe(chatId, mint, "mempool", onSnipeEvent);
+              const lpSignature = logs?.signature || null;
+              await triggerAutoSnipe(
+                chatId,
+                mint,
+                "mempool",
+                onSnipeEvent,
+                lpSignature
+              );
             }
           }
         } catch {}
@@ -65,7 +72,13 @@ async function isLPEvent(logs) {
   );
 }
 
-async function triggerAutoSnipe(chatId, mint, source, onSnipeEvent) {
+async function triggerAutoSnipe(
+  chatId,
+  mint,
+  source,
+  onSnipeEvent,
+  lpSignature = null
+) {
   const state = getUserState(chatId);
   const defaultSnipe = state.defaultSnipeSol ?? 0.05;
   const priorityFeeLamports = state.maxSnipeGasPrice;
@@ -81,6 +94,7 @@ async function triggerAutoSnipe(chatId, mint, source, onSnipeEvent) {
       source: `watch:${source}`,
       signalType: "lp_event",
       mint,
+      lpSignature,
       params: {
         amountSol: defaultSnipe,
         pollInterval,
@@ -101,6 +115,7 @@ async function triggerAutoSnipe(chatId, mint, source, onSnipeEvent) {
     retryCount,
     source: `watch:${source}`,
     signalType: "lp_event",
+    lpSignature,
     onEvent: (m) => {
       try {
         onSnipeEvent?.(mint, m);
