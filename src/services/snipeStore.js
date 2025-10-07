@@ -42,15 +42,33 @@ export async function initSnipeStore() {
   const dbName = process.env.MONGODB_DB || "turbosol";
   if (!uri) return false;
   if (mongoClient && snipesCol) return true;
-  mongoClient = new MongoClient(uri, { ignoreUndefined: true });
-  await mongoClient.connect();
-  const db = mongoClient.db(dbName);
-  snipesCol = db.collection("snipes");
   try {
-    await snipesCol.createIndex({ chatId: 1, mint: 1, status: 1 });
-    await snipesCol.createIndex({ status: 1, startedAt: -1 });
-  } catch {}
-  return true;
+    mongoClient = new MongoClient(uri, {
+      ignoreUndefined: true,
+      retryWrites: true,
+      minPoolSize: 1,
+      maxPoolSize: Number(process.env.MONGO_MAX_POOL || 10),
+      serverSelectionTimeoutMS: Number(process.env.MONGO_SELECT_TIMEOUT_MS || 5000),
+      connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS || 10000),
+      socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS || 20000),
+    });
+    await mongoClient.connect();
+    const db = mongoClient.db(dbName);
+    snipesCol = db.collection("snipes");
+    try {
+      await snipesCol.createIndex({ chatId: 1, mint: 1, status: 1 });
+      await snipesCol.createIndex({ status: 1, startedAt: -1 });
+    } catch {}
+    return true;
+  } catch (e) {
+    // Swallow DB init errors; fallback to file store
+    mongoClient = null;
+    snipesCol = null;
+    try {
+      console.warn(`Mongo snipes DB unavailable: ${e?.message || e}`);
+    } catch {}
+    return false;
+  }
 }
 
 export async function upsertActiveSnipe(

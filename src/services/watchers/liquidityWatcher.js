@@ -45,10 +45,16 @@ export function startLiquidityWatch(
     source, // optional: origin of this watcher (e.g., 'alpha:pump_launch')
     signalType, // optional: specific signal type/id
     lpSignature, // optional: tx signature for the LP addition (for Solscan link)
+    walletOverride, // optional: execute using a specific wallet keypair
+    // New: allow bypassing LP signature capture requirement for faster manual snipes
+    requireLpSigBeforeBuy, // optional: override env REQUIRE_LP_SIG_BEFORE_BUY
+    lpSigStrictAbortIfMissing, // optional: override env LP_SIG_STRICT_ABORT_IF_MISSING
   }
 ) {
   const canonicalMint = canonicalizeMint(mint);
-  const k = `${chatId}:${canonicalMint}`;
+  const k = walletOverride
+    ? `${chatId}:${canonicalMint}:${walletOverride.publicKey.toBase58()}`
+    : `${chatId}:${canonicalMint}`;
   const COOLDOWN_MS = Number(process.env.SNIPE_COOL_OFF_MS ?? 30000);
   const coolUntil = cooldowns.get(k) || 0;
   if (coolUntil && Date.now() < coolUntil) {
@@ -102,9 +108,12 @@ export function startLiquidityWatch(
   // LP detection wiring
   let lpSig = lpSignature || null;
   let logsSubIds = [];
+  // Prevent repeated Telegram spam for missing LP signature
+  let lpSigMissingWarned = false;
   const conn = getRpcConnection();
   const RAYDIUM_AMM_PROGRAM =
-    process.env.RAYDIUM_AMM_PROGRAM || "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+    process.env.RAYDIUM_AMM_PROGRAM ||
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
   // Helper: subscribe to logs for a given program and capture LP signature
   async function subscribeLpLogs(programId58) {
     try {
@@ -125,7 +134,9 @@ export function startLiquidityWatch(
               const keys58 = [
                 ...keys.map((k) => {
                   try {
-                    return k?.pubkey ? k.pubkey.toBase58() : k.toBase58?.() || String(k);
+                    return k?.pubkey
+                      ? k.pubkey.toBase58()
+                      : k.toBase58?.() || String(k);
                   } catch {
                     return String(k);
                   }
@@ -146,9 +157,13 @@ export function startLiquidityWatch(
                 }),
               ];
               const involvesMint = keys58.includes(canonicalMint);
-              const involvesAmm = lastAmmKeys?.some?.((ak) => keys58.includes(ak));
+              const involvesAmm = lastAmmKeys?.some?.((ak) =>
+                keys58.includes(ak)
+              );
               if (involvesMint || involvesAmm) {
                 lpSig = signature;
+                // Surface the LP tx hash to the user immediately
+                onEvent?.(`LP detected via logs. tx: ${signature}`);
                 try {
                   addTradeLog(chatId, {
                     kind: "telemetry",
@@ -157,7 +172,11 @@ export function startLiquidityWatch(
                     lpSignature: signature,
                     via: "logs_subscription",
                     programId: programId58,
-                    match: involvesMint ? "mint" : involvesAmm ? "ammKey" : "unknown",
+                    match: involvesMint
+                      ? "mint"
+                      : involvesAmm
+                      ? "ammKey"
+                      : "unknown",
                   });
                 } catch {}
               }
@@ -176,7 +195,9 @@ export function startLiquidityWatch(
       try {
         mintKey = new PublicKey(mint58);
       } catch {
-        console.warn(`⚠️ Invalid mint passed to mint log subscription: ${mint58}`);
+        console.warn(
+          `⚠️ Invalid mint passed to mint log subscription: ${mint58}`
+        );
         return;
       }
       const subId = await conn
@@ -188,7 +209,8 @@ export function startLiquidityWatch(
               const text = Array.isArray(logs?.logs)
                 ? logs.logs.join("\n")
                 : String(logs || "");
-              const looksLp = /liquidity|pool|lp|raydium|meteora|orca/i.test(text) ||
+              const looksLp =
+                /liquidity|pool|lp|raydium|meteora|orca/i.test(text) ||
                 /initialize.*pool|create.*pool|add.*liquidity/i.test(text);
               const tx = await getTransactionRaced(signature, {
                 commitment: "processed",
@@ -200,7 +222,9 @@ export function startLiquidityWatch(
               const keys58 = [
                 ...keys.map((k) => {
                   try {
-                    return k?.pubkey ? k.pubkey.toBase58() : k.toBase58?.() || String(k);
+                    return k?.pubkey
+                      ? k.pubkey.toBase58()
+                      : k.toBase58?.() || String(k);
                   } catch {
                     return String(k);
                   }
@@ -221,9 +245,13 @@ export function startLiquidityWatch(
                 }),
               ];
               const involvesMint = keys58.includes(canonicalMint);
-              const involvesAmm = lastAmmKeys?.some?.((ak) => keys58.includes(ak));
+              const involvesAmm = lastAmmKeys?.some?.((ak) =>
+                keys58.includes(ak)
+              );
               if (looksLp && (involvesMint || involvesAmm)) {
                 lpSig = signature;
+                // Surface the LP tx hash to the user immediately
+                onEvent?.(`LP detected via mint logs. tx: ${signature}`);
                 try {
                   addTradeLog(chatId, {
                     kind: "telemetry",
@@ -231,7 +259,11 @@ export function startLiquidityWatch(
                     stage: "lp_detected",
                     lpSignature: signature,
                     via: "mint_mentions_subscription",
-                    match: involvesMint ? "mint" : involvesAmm ? "ammKey" : "unknown",
+                    match: involvesMint
+                      ? "mint"
+                      : involvesAmm
+                      ? "ammKey"
+                      : "unknown",
                   });
                 } catch {}
               }
@@ -262,13 +294,17 @@ export function startLiquidityWatch(
   async function findLikelyLpSignature({ mint58, route }) {
     try {
       const limit = Number(process.env.LP_SIG_SCAN_LIMIT || 15);
-      const scanTimeout = Number(process.env.LP_SIG_SCAN_TX_READ_TIMEOUT_MS || 6000);
+      const scanTimeout = Number(
+        process.env.LP_SIG_SCAN_TX_READ_TIMEOUT_MS || 6000
+      );
       const ammKeys = Array.isArray(route?.routePlan)
         ? route.routePlan
             .map((s) => s?.swapInfo?.ammKey)
             .filter((x) => typeof x === "string" && x.length > 0)
         : [];
-      const candidates = Array.from(new Set([mint58, ...ammKeys])).filter(Boolean);
+      const candidates = Array.from(new Set([mint58, ...ammKeys])).filter(
+        Boolean
+      );
       const KEYWORDS = [
         "initialize pool",
         "add liquidity",
@@ -304,7 +340,9 @@ export function startLiquidityWatch(
           const keys58 = [
             ...keys.map((k) => {
               try {
-                return k?.pubkey ? k.pubkey.toBase58() : k.toBase58?.() || String(k);
+                return k?.pubkey
+                  ? k.pubkey.toBase58()
+                  : k.toBase58?.() || String(k);
               } catch {
                 return String(k);
               }
@@ -324,7 +362,9 @@ export function startLiquidityWatch(
               }
             }),
           ];
-          const keyMatch = keys58.includes(mint58) || ammKeys.some((ak) => keys58.includes(ak));
+          const keyMatch =
+            keys58.includes(mint58) ||
+            ammKeys.some((ak) => keys58.includes(ak));
           if ((line && KEYWORDS.some((kw) => line.includes(kw))) || keyMatch) {
             return sig;
           }
@@ -352,8 +392,10 @@ export function startLiquidityWatch(
           timeoutMs: Number(process.env.LP_SIG_SCAN_TX_READ_TIMEOUT_MS || 6000),
           maxRetries: 1,
         }).catch(() => null);
-        const logsText = tx?.meta?.logMessages?.join("\n")?.toLowerCase?.() || "";
-        const looksLp = /liquidity|pool|lp|raydium|meteora|orca/.test(logsText) ||
+        const logsText =
+          tx?.meta?.logMessages?.join("\n")?.toLowerCase?.() || "";
+        const looksLp =
+          /liquidity|pool|lp|raydium|meteora|orca/.test(logsText) ||
           /initialize.*pool|create.*pool|add.*liquidity/.test(logsText);
         const keys = tx?.transaction?.message?.accountKeys || [];
         const loadedW = tx?.meta?.loadedAddresses?.writable || [];
@@ -361,7 +403,9 @@ export function startLiquidityWatch(
         const keys58 = [
           ...keys.map((k) => {
             try {
-              return k?.pubkey ? k.pubkey.toBase58() : k.toBase58?.() || String(k);
+              return k?.pubkey
+                ? k.pubkey.toBase58()
+                : k.toBase58?.() || String(k);
             } catch {
               return String(k);
             }
@@ -419,8 +463,19 @@ export function startLiquidityWatch(
       return false;
     }
     // balance preflight
-    const bal = await getWalletBalance(chatId);
-    const solBal = Number(bal?.solBalance || 0);
+    let solBal = 0;
+    try {
+      if (walletOverride?.publicKey) {
+        const conn = getRpcConnection();
+        const lamports = await conn.getBalance(walletOverride.publicKey);
+        solBal = lamports / 1_000_000_000;
+      } else {
+        const bal = await getWalletBalance(chatId);
+        solBal = Number(bal?.solBalance || 0);
+      }
+    } catch {
+      solBal = 0;
+    }
     // Require enough to buy and still leave a fee reserve
     if (solBal < amountSol || solBal - amountSol < MIN_FEE_RESERVE_SOL) {
       if (!insufficientWarned) {
@@ -431,9 +486,8 @@ export function startLiquidityWatch(
           )} SOL to buy and keep ${MIN_FEE_RESERVE_SOL} SOL for fees.`
         );
         insufficientWarned = true;
-        // Pause this watcher to avoid repeated warnings
-        stopLiquidityWatch(chatId, canonicalizeMint(mint), "insufficient_sol");
       }
+      // Do not stop the watcher; keep probing until balance updates
       return false;
     }
     // optional risk check preflight
@@ -505,10 +559,14 @@ export function startLiquidityWatch(
         // Best-effort: if we don't have lpSig yet, try a quick local scan
         if (!lpSig) {
           try {
-            const quickBudget = Number(process.env.LP_SIG_QUICK_SCAN_BUDGET_MS || 1500);
+            const quickBudget = Number(
+              process.env.LP_SIG_QUICK_SCAN_BUDGET_MS || 1500
+            );
             const quick = await Promise.race([
               findLikelyLpSignature({ mint58: canonicalMint, route }),
-              new Promise((resolve) => setTimeout(() => resolve(null), quickBudget)),
+              new Promise((resolve) =>
+                setTimeout(() => resolve(null), quickBudget)
+              ),
             ]);
             if (quick) {
               lpSig = quick;
@@ -527,10 +585,14 @@ export function startLiquidityWatch(
         // Fallback: program-level scan if still not found
         if (!lpSig) {
           try {
-            const progBudget = Number(process.env.LP_SIG_PROGRAM_SCAN_BUDGET_MS || 1200);
+            const progBudget = Number(
+              process.env.LP_SIG_PROGRAM_SCAN_BUDGET_MS || 1200
+            );
             const prog = await Promise.race([
               findLpSigViaProgramScan({ mint58: canonicalMint }),
-              new Promise((resolve) => setTimeout(() => resolve(null), progBudget)),
+              new Promise((resolve) =>
+                setTimeout(() => resolve(null), progBudget)
+              ),
             ]);
             if (prog) {
               lpSig = prog;
@@ -547,18 +609,23 @@ export function startLiquidityWatch(
           } catch {}
         }
         const DISABLE_TOKEN_FALLBACK =
-          String(process.env.LP_SOLSCAN_DISABLE_TOKEN_FALLBACK || "true").toLowerCase() ===
-          "true";
+          String(
+            process.env.LP_SOLSCAN_DISABLE_TOKEN_FALLBACK || "true"
+          ).toLowerCase() === "true";
         const solscanLink = lpSig
           ? `https://solscan.io/tx/${lpSig}`
           : DISABLE_TOKEN_FALLBACK
           ? ""
           : `https://solscan.io/token/${canonicalMint}`;
         const baseMsg = `💧 Liquidity detected for ${canonicalMint} — route live. outRaw=${outRaw} impact=${impact}%`;
-        console.log(solscanLink ? `${baseMsg} | Solscan: ${solscanLink}` : baseMsg);
+        console.log(
+          solscanLink ? `${baseMsg} | Solscan: ${solscanLink}` : baseMsg
+        );
         // Emit a user-facing message with the LP transaction link if available
         if (lpSig) {
-          onEvent?.(`💧 LP detected for ${canonicalMint}. Solscan tx: https://solscan.io/tx/${lpSig}`);
+          onEvent?.(
+            `💧 LP detected for ${canonicalMint}. Solscan tx: https://solscan.io/tx/${lpSig}`
+          );
         }
         try {
           addTradeLog(chatId, {
@@ -820,9 +887,22 @@ export function startLiquidityWatch(
         prio = Math.floor(prio * (0.7 + 0.15 * (attempts - 1)));
 
       // Optionally wait briefly until LP signature is captured before buying
+      // Allow overrides per watcher for faster manual snipes (e.g., Snipe LP Add)
+      // Respect per-user preference and default to immediate buy if not specified
+      const userPrefs = getUserState(chatId) || {};
       const REQUIRE_LP_SIG_BEFORE_BUY =
-        String(process.env.REQUIRE_LP_SIG_BEFORE_BUY || "true").toLowerCase() ===
-        "true";
+        requireLpSigBeforeBuy ??
+        (typeof userPrefs.requireLpSigBeforeBuy === "boolean"
+          ? userPrefs.requireLpSigBeforeBuy
+          : String(process.env.REQUIRE_LP_SIG_BEFORE_BUY || "false")
+              .toLowerCase() === "true");
+      const LP_SIG_STRICT_ABORT_IF_MISSING =
+        lpSigStrictAbortIfMissing ??
+        (typeof userPrefs.lpSigStrictAbortIfMissing === "boolean"
+          ? userPrefs.lpSigStrictAbortIfMissing
+          : String(process.env.LP_SIG_STRICT_ABORT_IF_MISSING || "false")
+              .toLowerCase()
+              .trim() === "true");
       if (REQUIRE_LP_SIG_BEFORE_BUY && !lpSig) {
         const waitMs = Number(process.env.LP_SIG_WAIT_MS || 800);
         const startWait = Date.now();
@@ -837,6 +917,33 @@ export function startLiquidityWatch(
               mint: canonicalMint,
               stage: "lp_sig_wait_timeout",
               waitMs,
+            });
+          } catch {}
+          // If strict mode is enabled, do not proceed with the buy
+          if (LP_SIG_STRICT_ABORT_IF_MISSING) {
+            if (!lpSigMissingWarned) {
+              onEvent?.(
+                "No LP tx hash from RPC listeners; skipping buy until captured."
+              );
+              lpSigMissingWarned = true;
+            }
+            try {
+              addTradeLog(chatId, {
+                kind: "telemetry",
+                mint: canonicalMint,
+                stage: "lp_sig_missing_strict_abort",
+                attempt: attempts,
+              });
+            } catch {}
+            return;
+          }
+          // If strict abort is disabled, proceed immediately based on liquidity detection
+          try {
+            addTradeLog(chatId, {
+              kind: "telemetry",
+              mint: canonicalMint,
+              stage: "lp_sig_missing_proceed",
+              attempt: attempts,
             });
           } catch {}
         }
@@ -869,6 +976,8 @@ export function startLiquidityWatch(
         priorityFeeLamports: prio,
         useJitoBundle,
         chatId,
+        walletOverride,
+        fastSend: true,
       });
       const txid = swapRes?.txid;
 

@@ -31,6 +31,9 @@ const PERSISTED_KEYS = new Set([
   "enablePrivateRelay",
   "rpcStrategy",
   "dynamicPriorityFee",
+  // Multi-wallet selection
+  "multiWalletMode",
+  "selectedWalletIds",
   // Analytics toggles
   "enableBehaviorProfiling",
   "enableMultiHopCorrelation",
@@ -40,6 +43,8 @@ const PERSISTED_KEYS = new Set([
   "liqDeltaMinImprovPct",
   "deltaMaxPriceImpactPct",
   "deltaMinRouteAgeMs",
+  // Launch discovery filters
+  "launchFilter",
   // Tier (optional)
   "tier"
 ]);
@@ -139,6 +144,9 @@ export function getUserState(chatId) {
       enableMultiHopCorrelation: false,
       enableFundingPathAnalysis: false,
       // Wallet/positions/trades
+      // Multi-wallet selection and mode
+      multiWalletMode: false,
+      selectedWalletIds: [],
       positions: [],
       limitOrders: [],
       watchedWallets: [],
@@ -147,6 +155,16 @@ export function getUserState(chatId) {
       // Defaults for quick actions
       defaultBuySol: 0.05,
       defaultSnipeSol: 0.05,
+      // Discovery filters for new launches
+      launchFilter: {
+        maxAgeSec: 300, // alert only within first 5 minutes
+        minMarketCapUsd: 0, // minimum market cap for alerts (0 disables)
+        minLiquidityUsd: 0, // minimum liquidity if available via providers
+        minHolders: 0, // minimum holder count (best-effort, may be unavailable)
+        requireAntiRug: true, // run risk checks and require pass
+        requireLpLock: false, // require verified LP lock
+        maxBuyTaxBps: 1500 // block if buy tax exceeds threshold
+      },
       // Track last used amounts by mint for quick reuse in Re-Buy/Re-Quote
       lastAmounts: {},
       // Snipe-specific configuration
@@ -212,6 +230,10 @@ export function updateUserSetting(chatId, key, value) {
   state[key] = value;
   if (PERSISTED_KEYS.has(key)) {
     // Best-effort persistence
+    persistUserSetting(chatId, key, value).catch(() => {});
+  }
+  // If updating nested launchFilter object, persist whole object under the key
+  if (key === "launchFilter") {
     persistUserSetting(chatId, key, value).catch(() => {});
   }
 }

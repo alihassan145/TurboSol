@@ -12,6 +12,8 @@ import { getParsedTokenAccountsByOwnerRaced } from "./rpc.js";
 // In-memory caches for efficiency
 const _tokenListCacheByChat = new Map(); // chatId -> { ts, items }
 const _tokenMetaCache = new Map(); // mint -> { ts, symbol, name }
+// Balance cache to avoid transient 0 reads on RPC hiccups
+const _balanceCacheByChat = new Map(); // key -> { ts, solBalance, lamportsBalance }
 const TOKEN_LIST_TTL_MS = Number(process.env.TOKEN_LIST_TTL_MS || 20000);
 const TOKEN_META_TTL_MS = Number(process.env.TOKEN_META_TTL_MS || 3600_000);
 const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -114,23 +116,100 @@ export async function getWalletSellTokens(chatId) {
 }
 
 export async function getWalletBalance(chatId = null) {
+  const CACHE_TTL_MS = Number(process.env.BALANCE_CACHE_TTL_MS || 15000);
+  const key = chatId !== null ? `user:${chatId}` : "admin";
+  const now = Date.now();
+
+  // If we have a fresh cached value, prefer it to avoid transient 0s
+  const cached = _balanceCacheByChat.get(key);
+  if (cached && now - cached.ts < CACHE_TTL_MS) {
+    return {
+      solBalance: cached.solBalance,
+      lamportsBalance: cached.lamportsBalance,
+      fromCache: true,
+    };
+  }
+
+  let wallet;
   try {
-    let connection, wallet;
-
-    // Always use the global rotating RPC connection for reliability
-    connection = getConnection();
-
-    if (chatId !== null) {
-      wallet = await getUserWalletInstance(chatId);
-    } else {
-      wallet = getWallet();
+    wallet =
+      chatId !== null ? await getUserWalletInstance(chatId) : getWallet();
+  } catch (e) {
+    // If wallet retrieval fails, fall back to cache if available
+    if (cached) {
+      return {
+        solBalance: cached.solBalance,
+        lamportsBalance: cached.lamportsBalance,
+        fromCache: true,
+        error: e?.message || String(e),
+      };
     }
+    return {
+      solBalance: 0,
+      lamportsBalance: 0,
+      error: e?.message || String(e),
+    };
+  }
 
-    const balance = await connection.getBalance(wallet.publicKey);
+  // Attempt primary connection, then fallbacks on error
+  try {
+    const conn = getConnection();
+    const balance = await conn.getBalance(wallet.publicKey);
     const solBalance = balance / LAMPORTS_PER_SOL;
+    _balanceCacheByChat.set(key, {
+      ts: now,
+      solBalance,
+      lamportsBalance: balance,
+    });
     return { solBalance, lamportsBalance: balance };
-  } catch (error) {
-    return { solBalance: 0, lamportsBalance: 0, error: error.message };
+  } catch (primaryErr) {
+    // Fallback 1: per-user connection instance
+    try {
+      const userConn =
+        chatId !== null ? getUserConnectionInstance(chatId) : null;
+      if (userConn) {
+        const balance = await userConn.getBalance(wallet.publicKey);
+        const solBalance = balance / LAMPORTS_PER_SOL;
+        _balanceCacheByChat.set(key, {
+          ts: now,
+          solBalance,
+          lamportsBalance: balance,
+        });
+        return { solBalance, lamportsBalance: balance };
+      }
+    } catch {}
+
+    // Fallback 2: rotate RPC and retry once
+    try {
+      const { rotateRpc, getRpcConnection } = await import("./rpc.js");
+      try {
+        rotateRpc("balance_error");
+      } catch {}
+      const conn2 = getRpcConnection();
+      const balance2 = await conn2.getBalance(wallet.publicKey);
+      const solBalance2 = balance2 / LAMPORTS_PER_SOL;
+      _balanceCacheByChat.set(key, {
+        ts: now,
+        solBalance: solBalance2,
+        lamportsBalance: balance2,
+      });
+      return { solBalance: solBalance2, lamportsBalance: balance2 };
+    } catch (fallbackErr) {
+      // Final fallback: return cache if present
+      if (cached) {
+        return {
+          solBalance: cached.solBalance,
+          lamportsBalance: cached.lamportsBalance,
+          fromCache: true,
+          error: primaryErr?.message || fallbackErr?.message || "balance_error",
+        };
+      }
+      return {
+        solBalance: 0,
+        lamportsBalance: 0,
+        error: primaryErr?.message || fallbackErr?.message || "balance_error",
+      };
+    }
   }
 }
 

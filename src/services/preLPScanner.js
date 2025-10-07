@@ -392,7 +392,7 @@ export default PreLPScanner;
 // Helper wiring for early snipe on pre-LP signals
 import { getUserConnectionInstance } from './wallet.js';
 import { getUserState, addTradeLog } from './userState.js';
-import { hasUserWallet } from './userWallets.js';
+import { hasUserWallet, getUserWalletKeypairById } from './userWallets.js';
 import { startLiquidityWatch } from './watchers/liquidityWatcher.js';
 
 // Cooldown tracking to avoid duplicate triggers per mint
@@ -443,19 +443,62 @@ export async function startPreLPWatch(chatId, { onEvent, onSnipeEvent, autoSnipe
         addTradeLog(chatId, { kind: 'telemetry', stage: 'auto_snipe_trigger', source: 'watch:prelp', signalType: 'pre_lp_detected', mint, params: { amountSol: amountSol, pollInterval, slippageBps, retryCount, useJitoBundle } });
       } catch {}
 
-      startLiquidityWatch(chatId, {
-        mint,
-        amountSol,
-        priorityFeeLamports,
-        useJitoBundle,
-        pollInterval,
-        slippageBps,
-        retryCount,
-        source: 'watch:prelp',
-        signalType: 'pre_lp_detected',
-        lpSignature: details?.signature,
-        onEvent: (m) => { try { onSnipeEvent?.(mint, m); } catch {} },
-      });
+      {
+        const st = getUserState(chatId) || {};
+        const selected = Array.isArray(st.selectedWalletIds)
+          ? st.selectedWalletIds
+          : [];
+        const multi = !!st.multiWalletMode;
+        if (multi && selected.length > 0) {
+          const wallets = (
+            await Promise.all(
+              selected.map((id) =>
+                getUserWalletKeypairById(chatId, id).catch(() => null)
+              )
+            )
+          ).filter(Boolean);
+          const count = wallets.length || 0;
+          const perWallet = count > 0 ? amountSol / count : amountSol;
+          for (const w of wallets) {
+            startLiquidityWatch(chatId, {
+              mint,
+              amountSol: perWallet,
+              priorityFeeLamports,
+              useJitoBundle,
+              pollInterval,
+              slippageBps,
+              retryCount,
+              source: 'watch:prelp',
+              signalType: 'pre_lp_detected',
+              lpSignature: details?.signature,
+              walletOverride: w.keypair,
+              onEvent: (m) => {
+                try {
+                  onSnipeEvent?.(mint, m);
+                } catch {}
+              },
+            });
+          }
+        } else {
+          startLiquidityWatch(chatId, {
+            mint,
+            amountSol,
+            priorityFeeLamports,
+            useJitoBundle,
+            pollInterval,
+            slippageBps,
+            retryCount,
+            source: 'watch:prelp',
+            signalType: 'pre_lp_detected',
+            lpSignature: details?.signature,
+            onEvent: (m) => {
+              try {
+                onSnipeEvent?.(mint, m);
+              } catch {}
+            },
+          });
+        }
+      }
     } catch {}
   });
 

@@ -34,6 +34,7 @@ import {
   setActiveWallet,
   renameUserWallet,
   getAllUserWalletKeypairs,
+  getUserWalletKeypairById,
 } from "./userWallets.js";
 import {
   getWalletInfo,
@@ -193,19 +194,26 @@ async function buildTurboSolWelcomeMessage(chatId) {
 
     const pnlLines = (() => {
       if (!summary) return "";
-      const header = `\n\n📈 PnL Summary (Unrealized)\nExposure: ${
-        summary.exposureSol?.toFixed?.(4) ?? "?"
-      } SOL\nPnL: ${summary.unrealizedPnlSol?.toFixed?.(4) ?? "?"} SOL`;
+      const exposure = summary.totalExposureSol ?? summary.totalCost;
+      const header = `\n\n📈 Live PnL (Open Positions)\nExposure: ${
+        Number.isFinite(Number(exposure))
+          ? Number(exposure).toFixed(4)
+          : "?"
+      } SOL\nPnL: ${
+        Number.isFinite(Number(summary?.unrealizedPnlSol))
+          ? Number(summary.unrealizedPnlSol).toFixed(4)
+          : "?"
+      } SOL`;
       const positions = Array.isArray(summary.positions)
         ? summary.positions.slice(0, 5).map((p, i) => {
-            const upDown = Number(p.unrealizedPnlSol || 0) >= 0 ? "🟢" : "🔴";
-            const pnl = Number(p.unrealizedPnlSol || 0).toFixed(4);
-            const exp = Number(p.exposureSol || 0).toFixed(4);
-            const sym = p.symbol || (p.mint ? p.mint.slice(0, 4) + "…" : "?");
-            return `${
-              i + 1
-            }. ${upDown} ${sym} • Exp ${exp} SOL • PnL ${pnl} SOL`;
-          })
+          const upDown = Number(p.unrealizedPnlSol || 0) >= 0 ? "🟢" : "🔴";
+          const pnl = Number(p.unrealizedPnlSol || 0).toFixed(4);
+          const exp = Number(p.exposureSol || 0).toFixed(4);
+          const sym = p.symbol || (p.mint ? p.mint.slice(0, 4) + "…" : "?");
+          return `${
+            i + 1
+          }. ${upDown} ${sym} • Exp ${exp} SOL • PnL ${pnl} SOL`;
+        })
         : [];
       const body = positions.length
         ? `\n${positions.join("\n")}`
@@ -752,9 +760,48 @@ export async function startTelegramBot() {
         return;
       }
 
+      // Multi-wallet selection actions
+      case data === "MULTI_WALLET_TOGGLE": {
+        await ack();
+        const cur = !!getUserState(chatId).multiWalletMode;
+        updateUserSetting(chatId, "multiWalletMode", !cur);
+        const menu = await buildWalletsMenu(chatId);
+        if (!(await safeEditMarkup(menu.reply_markup))) {
+          await safeEditText("💼 Wallets — manage your wallets", menu.reply_markup);
+        }
+        return;
+      }
+      case data === "WALLET_CLEAR_SELECTION": {
+        await ack();
+        updateUserSetting(chatId, "selectedWalletIds", []);
+        const menu = await buildWalletsMenu(chatId);
+        if (!(await safeEditMarkup(menu.reply_markup))) {
+          await safeEditText("💼 Wallets — manage your wallets", menu.reply_markup);
+        }
+        return;
+      }
+
       // Handle clicking on a wallet row: set active and show details with funds
       case data.startsWith("WALLET_"): {
         const walletId = data.replace("WALLET_", "");
+        const state = getUserState(chatId);
+        if (state.multiWalletMode) {
+          await ack();
+          try {
+            const w = await getUserWalletKeypairById(chatId, walletId);
+            if (w && w.id) {
+              const cur = new Set(state.selectedWalletIds || []);
+              if (cur.has(w.id)) cur.delete(w.id);
+              else cur.add(w.id);
+              updateUserSetting(chatId, "selectedWalletIds", Array.from(cur));
+            }
+          } catch {}
+          const menu = await buildWalletsMenu(chatId);
+          if (!(await safeEditMarkup(menu.reply_markup))) {
+            await safeEditText("💼 Wallets — manage your wallets", menu.reply_markup);
+          }
+          return;
+        }
         try {
           await setActiveWallet(chatId, walletId);
           const header = await buildWalletStatusHeader(chatId);
@@ -901,6 +948,42 @@ export async function startTelegramBot() {
                   const defaultBuy = state.defaultBuySol ?? 0.05;
                   const mint = coin?.mint;
                   if (!mint) return;
+                  // Best-effort enrichment via rate-limited Pump.fun HTTP to avoid 429
+                  let details = null;
+                  try {
+                    const { getCoinDetailsRL } = await import("./pumpData.js");
+                    details = await getCoinDetailsRL(mint);
+                  } catch {}
+                  // Evaluate discovery filters before alerting
+                  const f = state.launchFilter || {};
+                  const now = Date.now();
+                  const ts = Number(coin?.created_timestamp || coin?.timestamp || now);
+                  const ageSec = Math.max(0, Math.floor((now - ts) / 1000));
+                  const mcUsd = Number(details?.usd_market_cap ?? coin?.marketCap ?? 0);
+                  const holders = Number(details?.holders ?? coin?.holders ?? 0);
+                  const minMc = Number(f.minMarketCapUsd || 0);
+                  const minHolders = Number(f.minHolders || 0);
+                  const maxAgeSec = Number(f.maxAgeSec || 0);
+                  let passes = true;
+                  if (maxAgeSec > 0 && ageSec > maxAgeSec) passes = false;
+                  if (minMc > 0 && (Number.isNaN(mcUsd) || mcUsd < minMc)) passes = false;
+                  if (minHolders > 0 && (Number.isNaN(holders) || holders < minHolders)) passes = false;
+                  if (passes && f.requireAntiRug) {
+                    try {
+                      const risk = await riskCheckToken(mint, {
+                        requireLpLock: !!f.requireLpLock,
+                        maxBuyTaxBps: Number(f.maxBuyTaxBps || state.maxSnipeGasPrice || 1500)
+                      });
+                      passes = !!risk?.ok;
+                    } catch {
+                      // If anti-rug required but check fails, block
+                      passes = false;
+                    }
+                  }
+                  if (!passes) {
+                    // Skip alert if filters not satisfied
+                    return;
+                  }
                   await bot.sendMessage(
                     chatId,
                     `🚨 Pump.fun launch detected\n\n${coin.symbol || ""} ${
@@ -919,6 +1002,12 @@ export async function startTelegramBot() {
                             {
                               text: "Quote",
                               callback_data: `AUTO_QUOTE_${mint}_${defaultBuy}`,
+                            },
+                          ],
+                          [
+                            {
+                              text: "Snipe LP Add",
+                              callback_data: `SNIPE_LP_${mint}_${defaultBuy}`,
                             },
                           ],
                           [
@@ -1497,6 +1586,119 @@ export async function startTelegramBot() {
       return;
     }
 
+    // Quick snipe from inline button: SNIPE_LP_{mint}_{amountSol}
+    if (data.startsWith("SNIPE_LP_")) {
+      const rest = data.slice("SNIPE_LP_".length);
+      const [mint, amtStr] = rest.split("_");
+      const amountSol = parseFloat(amtStr);
+      try {
+        await bot.answerCallbackQuery(query.id, { text: "Snipe LP Add" });
+      } catch {}
+      if (!Number.isFinite(amountSol) || amountSol <= 0) {
+        await bot.sendMessage(
+          chatId,
+          "❌ Invalid snipe amount provided in button."
+        );
+        return;
+      }
+      if (!(await hasUserWallet(chatId))) {
+        await bot.sendMessage(
+          chatId,
+          "❌ No wallet linked. Use /setup to create or /import <privateKeyBase58> to import an existing wallet."
+        );
+        return;
+      }
+      if (!canProceed(chatId, "SNIPE_LP_START", 1200)) {
+        await bot.sendMessage(
+          chatId,
+          "⏳ Please wait a moment before sending another request."
+        );
+        return;
+      }
+      const s = getUserState(chatId) || {};
+      const priorityFeeLamports =
+        s.maxSnipeGasPrice ?? getPriorityFeeLamports();
+      const useJitoBundle = s.enableJitoForSnipes ?? getUseJitoBundle();
+      const pollInterval = s.snipePollInterval;
+      const slippageBps = s.snipeSlippage;
+      const retryCount = s.snipeRetryCount;
+      try {
+        addTradeLog(chatId, {
+          kind: "telemetry",
+          stage: "auto_snipe_trigger",
+          source: "ui:telegram",
+          signalType: "launch_alert_snipe",
+          mint,
+          params: {
+            amountSol,
+            pollInterval,
+            slippageBps,
+            retryCount,
+            useJitoBundle,
+          },
+        });
+      } catch {}
+      const state = getUserState(chatId) || {};
+      const selected = Array.isArray(state.selectedWalletIds)
+        ? state.selectedWalletIds
+        : [];
+      const multi = !!state.multiWalletMode;
+      if (multi && selected.length > 0) {
+        const wallets = (
+          await Promise.all(
+            selected.map((id) =>
+              getUserWalletKeypairById(chatId, id).catch(() => null)
+            )
+          )
+        ).filter(Boolean);
+        const count = wallets.length || 0;
+        const perWallet = count > 0 ? amountSol / count : amountSol;
+        for (const w of wallets) {
+          startLiquidityWatch(chatId, {
+            mint,
+            amountSol: perWallet,
+            priorityFeeLamports,
+            useJitoBundle,
+            pollInterval,
+            slippageBps,
+            retryCount,
+            source: "ui:telegram",
+            signalType: "launch_alert_snipe",
+            // Efficiency: proceed based on liquidity detection even if LP signature is not captured
+            requireLpSigBeforeBuy: false,
+            lpSigStrictAbortIfMissing: false,
+            walletOverride: w.keypair,
+            onEvent: (m) => bot.sendMessage(chatId, m).catch(() => {}),
+          });
+        }
+        await bot.sendMessage(
+          chatId,
+          `👀 Watching for LP on ${mint} across ${count} selected wallets. Per-wallet: ${perWallet} SOL`
+        );
+      } else {
+        startLiquidityWatch(chatId, {
+          mint,
+          amountSol,
+          priorityFeeLamports,
+          useJitoBundle,
+          pollInterval,
+          slippageBps,
+          retryCount,
+          source: "ui:telegram",
+          signalType: "launch_alert_snipe",
+          // Efficiency: proceed based on liquidity detection even if LP signature is not captured
+          requireLpSigBeforeBuy: false,
+          lpSigStrictAbortIfMissing: false,
+          onEvent: (m) => bot.sendMessage(chatId, m).catch(() => {}),
+        });
+        await bot.sendMessage(
+          chatId,
+          `👀 Watching for LP on ${mint}. Will buy ${amountSol} SOL when detected.`
+        );
+      }
+      return;
+    }
+
     if (data === "QUICK_SELL") {
       try {
         await bot.answerCallbackQuery(query.id, { text: "Quick Sell" });
@@ -1621,59 +1823,130 @@ export async function startTelegramBot() {
         });
         const priorityFeeLamports = getPriorityFeeLamports();
         const useJitoBundle = getUseJitoBundle();
-        await bot.sendMessage(
-          chatId,
-          `⏳ Placing quick sell of ${percent}% for token ${mint}...`
-        );
-        const sellRes = await quickSell({
-          tokenMint: mint,
-          percent,
-          priorityFeeLamports,
-          useJitoBundle,
-          chatId,
-        });
-        setPendingInput(chatId, null);
-        const txid =
-          sellRes?.txid ||
-          (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
-        const solscan = `https://solscan.io/tx/${txid}`;
-        const solOut =
-          typeof sellRes?.output?.tokensOut === "number"
-            ? sellRes.output.tokensOut.toFixed(6)
-            : "?";
-        const impact =
-          typeof sellRes?.route?.priceImpactPct === "number"
-            ? `${(sellRes.route.priceImpactPct * 100).toFixed(2)}%`
-            : "?";
-        await bot.sendMessage(
-          chatId,
-          `✅ Sell sent\n• Token: ${mint}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${
-            sellRes?.route?.labels || "route"
-          }\n• Price impact: ${impact}\n• Slippage: ${
-            sellRes?.slippageBps
-          } bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${
-            sellRes?.via
-          }\n• Latency: ${sellRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`
-        );
-        // Record sell trade log with racing telemetry
-        addTradeLog(chatId, {
-          kind: "sell",
-          mint,
-          percent,
-          sol: Number(sellRes?.output?.tokensOut ?? NaN),
-          route: sellRes?.route?.labels,
-          priceImpactPct: sellRes?.route?.priceImpactPct ?? null,
-          slippageBps: sellRes?.slippageBps,
-          priorityFeeLamports: sellRes?.priorityFeeLamports,
-          via: sellRes?.via,
-          latencyMs: sellRes?.latencyMs,
-          txid,
-          lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
-          lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
-          lastSendRaceLatencyMs: sellRes?.lastSendRaceLatencyMs ?? null,
-        });
-        // Follow-up: notify on confirmation or failure
-        notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(() => {});
+        const state = getUserState(chatId);
+        const selectedIds = Array.isArray(state.selectedWalletIds)
+          ? state.selectedWalletIds
+          : [];
+        const multi = state.multiWalletMode && selectedIds.length > 0;
+        if (multi) {
+          const allWallets = await listUserWallets(chatId);
+          const byId = new Map(allWallets.map((w) => [w.id, w]));
+          const targets = selectedIds
+            .map((id) => byId.get(id))
+            .filter(Boolean)
+            .slice(0, 12); // safety cap
+          await bot.sendMessage(
+            chatId,
+            `⏳ Placing quick sell of ${percent}% for ${targets.length} wallets…`
+          );
+          const ops = targets.map(async (w) => {
+            const kp = await getUserWalletKeypairById(chatId, w.id);
+            return quickSell({
+              tokenMint: mint,
+              percent,
+              priorityFeeLamports,
+              useJitoBundle,
+              chatId,
+              walletOverride: kp?.keypair,
+            });
+          });
+          const results = await Promise.allSettled(ops);
+          setPendingInput(chatId, null);
+          const successes = results
+            .filter((r) => r.status === "fulfilled")
+            .map((r) => r.value);
+          const failures = results.filter((r) => r.status === "rejected");
+          const firstTxid = (() => {
+            for (const r of successes) {
+              const tid = r?.txid || (Array.isArray(r?.txids) ? r.txids[0] : null);
+              if (tid) return tid;
+            }
+            return null;
+          })();
+          const solscan = firstTxid ? `https://solscan.io/tx/${firstTxid}` : "";
+          await bot.sendMessage(
+            chatId,
+            `✅ Sells placed: ${successes.length}/${targets.length}${
+              solscan ? `\n🔗 First tx: ${solscan}` : ""
+            }${failures.length ? `\n⚠️ Failures: ${failures.length}` : ""}`
+          );
+          for (const sellRes of successes) {
+            const txid =
+              sellRes?.txid ||
+              (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
+            addTradeLog(chatId, {
+              kind: "sell",
+              mint,
+              percent,
+              sol: Number(sellRes?.output?.tokensOut ?? NaN),
+              route: sellRes?.route?.labels,
+              priceImpactPct: sellRes?.route?.priceImpactPct ?? null,
+              slippageBps: sellRes?.slippageBps,
+              priorityFeeLamports: sellRes?.priorityFeeLamports,
+              via: sellRes?.via,
+              latencyMs: sellRes?.latencyMs,
+              txid,
+              lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
+              lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
+              lastSendRaceLatencyMs: sellRes?.lastSendRaceLatencyMs ?? null,
+            });
+            notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(() => {});
+          }
+        } else {
+          await bot.sendMessage(
+            chatId,
+            `⏳ Placing quick sell of ${percent}% for token ${mint}...`
+          );
+          const sellRes = await quickSell({
+            tokenMint: mint,
+            percent,
+            priorityFeeLamports,
+            useJitoBundle,
+            chatId,
+          });
+          setPendingInput(chatId, null);
+          const txid =
+            sellRes?.txid ||
+            (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
+          const solscan = `https://solscan.io/tx/${txid}`;
+          const solOut =
+            typeof sellRes?.output?.tokensOut === "number"
+              ? sellRes.output.tokensOut.toFixed(6)
+              : "?";
+          const impact =
+            typeof sellRes?.route?.priceImpactPct === "number"
+              ? `${(sellRes.route.priceImpactPct * 100).toFixed(2)}%`
+              : "?";
+          await bot.sendMessage(
+            chatId,
+            `✅ Sell sent\n• Token: ${mint}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${
+              sellRes?.route?.labels || "route"
+            }\n• Price impact: ${impact}\n• Slippage: ${
+              sellRes?.slippageBps
+            } bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${
+              sellRes?.via
+            }\n• Latency: ${sellRes?.latencyMs} ms\n• Tx: ${txid}\n🔗 ${solscan}`
+          );
+          // Record sell trade log with racing telemetry
+          addTradeLog(chatId, {
+            kind: "sell",
+            mint,
+            percent,
+            sol: Number(sellRes?.output?.tokensOut ?? NaN),
+            route: sellRes?.route?.labels,
+            priceImpactPct: sellRes?.route?.priceImpactPct ?? null,
+            slippageBps: sellRes?.slippageBps,
+            priorityFeeLamports: sellRes?.priorityFeeLamports,
+            via: sellRes?.via,
+            latencyMs: sellRes?.latencyMs,
+            txid,
+            lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
+            lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
+            lastSendRaceLatencyMs: sellRes?.lastSendRaceLatencyMs ?? null,
+          });
+          // Follow-up: notify on confirmation or failure
+          notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(() => {});
+        }
       } catch (e) {
         await bot.sendMessage(
           chatId,
@@ -2189,22 +2462,60 @@ export async function startTelegramBot() {
             },
           });
         } catch {}
-        startLiquidityWatch(chatId, {
-          mint,
-          amountSol,
-          priorityFeeLamports,
-          useJitoBundle,
-          pollInterval,
-          slippageBps,
-          retryCount,
-          source: "ui:telegram",
-          signalType: "manual_auto_snipe",
-          onEvent: (m) => bot.sendMessage(chatId, m),
-        });
-        await bot.sendMessage(
-          chatId,
-          `Watching for LP on ${mint}. Will buy ${amountSol} SOL when detected.`
-        );
+        {
+          const state = getUserState(chatId) || {};
+          const selected = Array.isArray(state.selectedWalletIds)
+            ? state.selectedWalletIds
+            : [];
+          const multi = !!state.multiWalletMode;
+          if (multi && selected.length > 0) {
+            const wallets = (
+              await Promise.all(
+                selected.map((id) =>
+                  getUserWalletKeypairById(chatId, id).catch(() => null)
+                )
+              )
+            ).filter(Boolean);
+            const count = wallets.length || 0;
+            const perWallet = count > 0 ? amountSol / count : amountSol;
+            for (const w of wallets) {
+              startLiquidityWatch(chatId, {
+                mint,
+                amountSol: perWallet,
+                priorityFeeLamports,
+                useJitoBundle,
+                pollInterval,
+                slippageBps,
+                retryCount,
+                source: "ui:telegram",
+                signalType: "manual_auto_snipe",
+                walletOverride: w.keypair,
+                onEvent: (m) => bot.sendMessage(chatId, m),
+              });
+            }
+            await bot.sendMessage(
+              chatId,
+              `Watching for LP on ${mint} across ${count} selected wallets. Per-wallet: ${perWallet} SOL`
+            );
+          } else {
+            startLiquidityWatch(chatId, {
+              mint,
+              amountSol,
+              priorityFeeLamports,
+              useJitoBundle,
+              pollInterval,
+              slippageBps,
+              retryCount,
+              source: "ui:telegram",
+              signalType: "manual_auto_snipe",
+              onEvent: (m) => bot.sendMessage(chatId, m),
+            });
+            await bot.sendMessage(
+              chatId,
+              `Watching for LP on ${mint}. Will buy ${amountSol} SOL when detected.`
+            );
+          }
+        }
         return;
       }
 
@@ -3429,23 +3740,63 @@ export async function startTelegramBot() {
 
           setPendingInput(chatId, null);
 
-          startLiquidityWatch(chatId, {
-            mint: tokenAddress,
-            amountSol,
-            priorityFeeLamports,
-            useJitoBundle,
-            pollInterval,
-            slippageBps,
-            retryCount,
-            source: "ui:telegram",
-            signalType: "manual_lp_add",
-            onEvent: (m) => bot.sendMessage(chatId, m),
-          });
+          {
+            const state2 = getUserState(chatId) || {};
+            const selected2 = Array.isArray(state2.selectedWalletIds)
+              ? state2.selectedWalletIds
+              : [];
+            const multi2 = !!state2.multiWalletMode;
+            if (multi2 && selected2.length > 0) {
+              const wallets2 = (
+                await Promise.all(
+                  selected2.map((id) =>
+                    getUserWalletKeypairById(chatId, id).catch(() => null)
+                  )
+                )
+              ).filter(Boolean);
+              const count2 = wallets2.length || 0;
+              const perWallet2 = count2 > 0 ? amountSol / count2 : amountSol;
+              for (const w of wallets2) {
+                startLiquidityWatch(chatId, {
+                  mint: tokenAddress,
+                  amountSol: perWallet2,
+                  priorityFeeLamports,
+                  useJitoBundle,
+                  pollInterval,
+                  slippageBps,
+                  retryCount,
+                  source: "ui:telegram",
+                  signalType: "manual_lp_add",
+                  walletOverride: w.keypair,
+                  onEvent: (m) => bot.sendMessage(chatId, m).catch(() => {}),
+                });
+              }
+              await bot.sendMessage(
+                chatId,
+                `👀 Watching for LP on ${tokenAddress} across ${count2} selected wallets. Per-wallet: ${perWallet2} SOL`
+              );
+            } else {
+              startLiquidityWatch(chatId, {
+                mint: tokenAddress,
+                amountSol,
+                priorityFeeLamports,
+                useJitoBundle,
+                pollInterval,
+                slippageBps,
+                retryCount,
+                source: "ui:telegram",
+                signalType: "manual_lp_add",
+                onEvent: (m) => bot
+                  .sendMessage(chatId, m)
+                  .catch(() => {}),
+              });
 
-          await bot.sendMessage(
-            chatId,
-            `👀 Watching for LP on ${tokenAddress}. Will buy ${amountSol} SOL when detected.`
-          );
+              await bot.sendMessage(
+                chatId,
+                `👀 Watching for LP on ${tokenAddress}. Will buy ${amountSol} SOL when detected.`
+              );
+            }
+          }
         } catch (e) {
           await bot.sendMessage(
             chatId,
@@ -3554,7 +3905,34 @@ export async function startTelegramBot() {
               chatId,
               `⏳ Placing buy ${amountSol} SOL into ${tokenAddress}...`
             );
-            if (flags.splitAcrossWallets) {
+            const st = getUserState(chatId);
+            const selectedIds = Array.isArray(st.selectedWalletIds)
+              ? st.selectedWalletIds
+              : [];
+            if (st.multiWalletMode && selectedIds.length > 0) {
+              const allWallets = await listUserWallets(chatId);
+              const byId = new Map(allWallets.map((w) => [w.id, w]));
+              const targets = selectedIds
+                .map((id) => byId.get(id))
+                .filter(Boolean)
+                .slice(0, 12);
+              const perWallet = amountSol / Math.max(1, targets.length);
+              const tasks = await Promise.all(
+                targets.map(async (w) => {
+                  const kp = await getUserWalletKeypairById(chatId, w.id);
+                  return performSwap({
+                    inputMint: "So11111111111111111111111111111111111111112",
+                    outputMint: tokenAddress,
+                    amountSol: perWallet,
+                    priorityFeeLamports,
+                    useJitoBundle,
+                    chatId,
+                    walletOverride: kp?.keypair,
+                  });
+                })
+              );
+              swapPromise = Promise.all(tasks);
+            } else if (flags.splitAcrossWallets) {
               const wallets = await getAllUserWalletKeypairs(chatId);
               const desired = flags.walletsCount || wallets.length || 1;
               const count = Math.max(1, Math.min(desired, wallets.length || 1));
@@ -3827,178 +4205,253 @@ export async function startTelegramBot() {
         try {
           const priorityFeeLamports = getPriorityFeeLamports();
           const useJitoBundle = getUseJitoBundle();
-          await bot.sendMessage(
-            chatId,
-            `⏳ Placing quick sell of ${percent}% for token ${tokenAddress}...`
-          );
-          let swapPromise = quickSell({
-            tokenMint: tokenAddress,
-            percent,
-            priorityFeeLamports,
-            useJitoBundle,
-            chatId,
-          });
-          const TIMEOUT_MS = Number(process.env.SWAP_TIMEOUT_MS || 18000);
-          try {
-            const sellRes = await promiseWithTimeout(
-              swapPromise,
-              TIMEOUT_MS,
-              "swap_timeout"
-            );
-            setPendingInput(chatId, null);
-            const txid =
-              sellRes?.txid ||
-              (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
-            const solscan = txid ? `https://solscan.io/tx/${txid}` : "";
-            const solOut =
-              typeof sellRes?.output?.tokensOut === "number"
-                ? sellRes.output.tokensOut.toFixed(6)
-                : "?";
-            const impact =
-              typeof sellRes?.route?.priceImpactPct === "number"
-                ? `${(sellRes.route.priceImpactPct * 100).toFixed(2)}%`
-                : "?";
+          const st = getUserState(chatId);
+          const selectedIds = Array.isArray(st.selectedWalletIds)
+            ? st.selectedWalletIds
+            : [];
+          const multi = st.multiWalletMode && selectedIds.length > 0;
+          if (multi) {
+            const allWallets = await listUserWallets(chatId);
+            const byId = new Map(allWallets.map((w) => [w.id, w]));
+            const targets = selectedIds
+              .map((id) => byId.get(id))
+              .filter(Boolean)
+              .slice(0, 12);
             await bot.sendMessage(
               chatId,
-              `✅ Sell sent\n• Token: ${tokenAddress}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${
-                sellRes?.route?.labels || "route"
-              }\n• Price impact: ${impact}\n• Slippage: ${
-                sellRes?.slippageBps
-              } bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${
-                sellRes?.via
-              }\n• Latency: ${
-                sellRes?.latencyMs
-              } ms\n• Tx: ${txid}\n🔗 ${solscan}`
+              `⏳ Placing quick sell of ${percent}% across ${targets.length} wallets…`
             );
-            addTradeLog(chatId, {
-              kind: "sell",
-              mint: tokenAddress,
-              percent,
-              sol: Number(sellRes?.output?.tokensOut ?? NaN),
-              route: sellRes?.route?.labels,
-              priceImpactPct: sellRes?.route?.priceImpactPct ?? null,
-              slippageBps: sellRes?.slippageBps,
-              priorityFeeLamports: sellRes?.priorityFeeLamports,
-              via: sellRes?.via,
-              latencyMs: sellRes?.latencyMs,
-              txid,
-              lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
-              lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
-              lastSendRaceLatencyMs: sellRes?.lastSendRaceLatencyMs ?? null,
-            });
-            notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(() => {});
-          } catch (err) {
-            if (err?.code === "swap_timeout") {
-              await bot.sendMessage(
+            const ops = targets.map(async (w) => {
+              const kp = await getUserWalletKeypairById(chatId, w.id);
+              return quickSell({
+                tokenMint: tokenAddress,
+                percent,
+                priorityFeeLamports,
+                useJitoBundle,
                 chatId,
-                "⏳ Network congestion: Sell may still land. We'll update shortly."
-              );
-              const FINAL_TIMEOUT_MS = Number(
-                process.env.SWAP_FINAL_TIMEOUT_MS || 120000
-              );
-              try {
-                const sellRes = await promiseWithTimeout(
-                  swapPromise,
-                  FINAL_TIMEOUT_MS,
-                  "final_timeout"
-                );
-                setPendingInput(chatId, null);
-                const txid =
-                  sellRes?.txid ||
-                  (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
-                const solscan = txid ? `https://solscan.io/tx/${txid}` : "";
-                const solOut =
-                  typeof sellRes?.output?.tokensOut === "number"
-                    ? sellRes.output.tokensOut.toFixed(6)
-                    : "?";
-                const impact =
-                  typeof sellRes?.route?.priceImpactPct === "number"
-                    ? `${(sellRes.route.priceImpactPct * 100).toFixed(2)}%`
-                    : "?";
-                await bot.sendMessage(
-                  chatId,
-                  `✅ Sell sent\n• Token: ${tokenAddress}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${
-                    sellRes?.route?.labels || "route"
-                  }\n• Price impact: ${impact}\n• Slippage: ${
-                    sellRes?.slippageBps
-                  } bps\n• Priority fee: ${
-                    sellRes?.priorityFeeLamports
-                  }\n• Via: ${sellRes?.via}\n• Latency: ${
-                    sellRes?.latencyMs
-                  } ms\n• Tx: ${txid}\n🔗 ${solscan}`
-                );
-                try {
-                  addTradeLog(chatId, {
-                    kind: "sell",
-                    mint: tokenAddress,
-                    percent,
-                    sol: Number(sellRes?.output?.tokensOut ?? NaN),
-                    route: sellRes?.route?.labels,
-                    priceImpactPct: sellRes?.route?.priceImpactPct ?? null,
-                    slippageBps: sellRes?.slippageBps,
-                    priorityFeeLamports: sellRes?.priorityFeeLamports,
-                    via: sellRes?.via,
-                    latencyMs: sellRes?.latencyMs,
-                    txid,
-                    lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
-                    lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
-                    lastSendRaceLatencyMs:
-                      sellRes?.lastSendRaceLatencyMs ?? null,
-                  });
-                  notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(
-                    () => {}
-                  );
-                } catch {}
-              } catch (finalErr) {
-                const code = finalErr?.code;
-                if (code === "final_timeout") {
-                  await bot.sendMessage(
-                    chatId,
-                    "⏳ Sell still pending. We'll notify you once it confirms."
-                  );
-                  try {
-                    addTradeLog(chatId, {
-                      kind: "status",
-                      statusOf: "sell",
-                      mint: tokenAddress,
-                      percent,
-                      status: "pending",
-                    });
-                  } catch {}
-                } else {
-                  const msgErr = (finalErr?.message || String(finalErr)).slice(
-                    0,
-                    300
-                  );
-                  await bot.sendMessage(
-                    chatId,
-                    `❌ Quick Sell failed: ${msgErr}`
-                  );
-                  try {
-                    addTradeLog(chatId, {
-                      kind: "status",
-                      statusOf: "sell",
-                      mint: tokenAddress,
-                      percent,
-                      status: "failed",
-                      failReason: msgErr,
-                    });
-                  } catch {}
-                }
+                walletOverride: kp?.keypair,
+              });
+            });
+            const results = await Promise.allSettled(ops);
+            setPendingInput(chatId, null);
+            const successes = results
+              .filter((r) => r.status === "fulfilled")
+              .map((r) => r.value);
+            const failures = results.filter((r) => r.status === "rejected");
+            const firstTxid = (() => {
+              for (const r of successes) {
+                const tid =
+                  r?.txid || (Array.isArray(r?.txids) ? r.txids[0] : null);
+                if (tid) return tid;
               }
-            } else {
-              const msgErr = (err?.message || String(err)).slice(0, 300);
-              await bot.sendMessage(chatId, `❌ Quick Sell failed: ${msgErr}`);
+              return null;
+            })();
+            const solscan = firstTxid ? `https://solscan.io/tx/${firstTxid}` : "";
+            await bot.sendMessage(
+              chatId,
+              `✅ Sells placed: ${successes.length}/${targets.length}${
+                solscan ? `\n🔗 First tx: ${solscan}` : ""
+              }${failures.length ? `\n⚠️ Failures: ${failures.length}` : ""}`
+            );
+            for (const sellRes of successes) {
+              const txid =
+                sellRes?.txid ||
+                (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
               try {
                 addTradeLog(chatId, {
-                  kind: "status",
-                  statusOf: "sell",
+                  kind: "sell",
                   mint: tokenAddress,
                   percent,
-                  status: "failed",
-                  failReason: msgErr,
+                  sol: Number(sellRes?.output?.tokensOut ?? NaN),
+                  route: sellRes?.route?.labels,
+                  priceImpactPct: sellRes?.route?.priceImpactPct ?? null,
+                  slippageBps: sellRes?.slippageBps,
+                  priorityFeeLamports: sellRes?.priorityFeeLamports,
+                  via: sellRes?.via,
+                  latencyMs: sellRes?.latencyMs,
+                  txid,
+                  lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
+                  lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
+                  lastSendRaceLatencyMs:
+                    sellRes?.lastSendRaceLatencyMs ?? null,
                 });
+                notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(() => {});
               } catch {}
+            }
+          } else {
+            await bot.sendMessage(
+              chatId,
+              `⏳ Placing quick sell of ${percent}% for token ${tokenAddress}...`
+            );
+            let swapPromise = quickSell({
+              tokenMint: tokenAddress,
+              percent,
+              priorityFeeLamports,
+              useJitoBundle,
+              chatId,
+            });
+            const TIMEOUT_MS = Number(process.env.SWAP_TIMEOUT_MS || 18000);
+            try {
+              const sellRes = await promiseWithTimeout(
+                swapPromise,
+                TIMEOUT_MS,
+                "swap_timeout"
+              );
+              setPendingInput(chatId, null);
+              const txid =
+                sellRes?.txid ||
+                (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
+              const solscan = txid ? `https://solscan.io/tx/${txid}` : "";
+              const solOut =
+                typeof sellRes?.output?.tokensOut === "number"
+                  ? sellRes.output.tokensOut.toFixed(6)
+                  : "?";
+              const impact =
+                typeof sellRes?.route?.priceImpactPct === "number"
+                  ? `${(sellRes.route.priceImpactPct * 100).toFixed(2)}%`
+                  : "?";
+              await bot.sendMessage(
+                chatId,
+                `✅ Sell sent\n• Token: ${tokenAddress}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${
+                  sellRes?.route?.labels || "route"
+                }\n• Price impact: ${impact}\n• Slippage: ${
+                  sellRes?.slippageBps
+                } bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${
+                  sellRes?.via
+                }\n• Latency: ${
+                  sellRes?.latencyMs
+                } ms\n• Tx: ${txid}\n🔗 ${solscan}`
+              );
+              addTradeLog(chatId, {
+                kind: "sell",
+                mint: tokenAddress,
+                percent,
+                sol: Number(sellRes?.output?.tokensOut ?? NaN),
+                route: sellRes?.route?.labels,
+                priceImpactPct: sellRes?.route?.priceImpactPct ?? null,
+                slippageBps: sellRes?.slippageBps,
+                priorityFeeLamports: sellRes?.priorityFeeLamports,
+                via: sellRes?.via,
+                latencyMs: sellRes?.latencyMs,
+                txid,
+                lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
+                lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
+                lastSendRaceLatencyMs: sellRes?.lastSendRaceLatencyMs ?? null,
+              });
+              notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(() => {});
+            } catch (err) {
+              if (err?.code === "swap_timeout") {
+                await bot.sendMessage(
+                  chatId,
+                  "⏳ Network congestion: Sell may still land. We'll update shortly."
+                );
+                const FINAL_TIMEOUT_MS = Number(
+                  process.env.SWAP_FINAL_TIMEOUT_MS || 120000
+                );
+                try {
+                  const sellRes = await promiseWithTimeout(
+                    swapPromise,
+                    FINAL_TIMEOUT_MS,
+                    "final_timeout"
+                  );
+                  setPendingInput(chatId, null);
+                  const txid =
+                    sellRes?.txid ||
+                    (Array.isArray(sellRes?.txids) ? sellRes.txids[0] : null);
+                  const solscan = txid ? `https://solscan.io/tx/${txid}` : "";
+                  const solOut =
+                    typeof sellRes?.output?.tokensOut === "number"
+                      ? sellRes.output.tokensOut.toFixed(6)
+                      : "?";
+                  const impact =
+                    typeof sellRes?.route?.priceImpactPct === "number"
+                      ? `${(sellRes.route.priceImpactPct * 100).toFixed(2)}%`
+                      : "?";
+                  await bot.sendMessage(
+                    chatId,
+                    `✅ Sell sent\n• Token: ${tokenAddress}\n• Percent: ${percent}%\n• Est. SOL Out: ${solOut}\n• Route: ${
+                      sellRes?.route?.labels || "route"
+                    }\n• Price impact: ${impact}\n• Slippage: ${
+                      sellRes?.slippageBps
+                    } bps\n• Priority fee: ${sellRes?.priorityFeeLamports}\n• Via: ${
+                      sellRes?.via
+                    }\n• Latency: ${
+                      sellRes?.latencyMs
+                    } ms\n• Tx: ${txid}\n🔗 ${solscan}`
+                  );
+                  try {
+                    addTradeLog(chatId, {
+                      kind: "sell",
+                      mint: tokenAddress,
+                      percent,
+                      sol: Number(sellRes?.output?.tokensOut ?? NaN),
+                      route: sellRes?.route?.labels,
+                      priceImpactPct: sellRes?.route?.priceImpactPct ?? null,
+                      slippageBps: sellRes?.slippageBps,
+                      priorityFeeLamports: sellRes?.priorityFeeLamports,
+                      via: sellRes?.via,
+                      latencyMs: sellRes?.latencyMs,
+                      txid,
+                      lastSendRaceWinner: sellRes?.lastSendRaceWinner ?? null,
+                      lastSendRaceAttempts: sellRes?.lastSendRaceAttempts ?? 0,
+                      lastSendRaceLatencyMs:
+                        sellRes?.lastSendRaceLatencyMs ?? null,
+                    });
+                    notifyTxStatus(chatId, txid, { kind: "Sell" }).catch(
+                      () => {}
+                    );
+                  } catch {}
+                } catch (finalErr) {
+                  const code = finalErr?.code;
+                  if (code === "final_timeout") {
+                    await bot.sendMessage(
+                      chatId,
+                      "⏳ Sell still pending. We'll notify you once it confirms."
+                    );
+                    try {
+                      addTradeLog(chatId, {
+                        kind: "status",
+                        statusOf: "sell",
+                        mint: tokenAddress,
+                        percent,
+                        status: "pending",
+                      });
+                    } catch {}
+                  } else {
+                    const msgErr = (finalErr?.message || String(finalErr)).slice(
+                      0,
+                      300
+                    );
+                    await bot.sendMessage(
+                      chatId,
+                      `❌ Quick Sell failed: ${msgErr}`
+                    );
+                    try {
+                      addTradeLog(chatId, {
+                        kind: "status",
+                        statusOf: "sell",
+                        mint: tokenAddress,
+                        percent,
+                        status: "failed",
+                        failReason: msgErr,
+                      });
+                    } catch {}
+                  }
+                }
+              } else {
+                const msgErr = (err?.message || String(err)).slice(0, 300);
+                await bot.sendMessage(chatId, `❌ Quick Sell failed: ${msgErr}`);
+                try {
+                  addTradeLog(chatId, {
+                    kind: "status",
+                    statusOf: "sell",
+                    mint: tokenAddress,
+                    percent,
+                    status: "failed",
+                    failReason: msgErr,
+                  });
+                } catch {}
+              }
             }
           }
         } catch (e) {

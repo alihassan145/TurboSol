@@ -1,6 +1,7 @@
 import { getWalletInfo } from "./walletInfo.js";
 import { getRpcStatus } from "./rpcMonitor.js";
 import { getUserState } from "./userState.js";
+import { getUserWalletKeypairById } from "./userWallets.js";
 import { listUserWallets } from "./userWallets.js";
 import { getCopyTradeState } from "./userState.js";
 import {
@@ -242,6 +243,9 @@ export function buildTurboSolSettingsMenu(chatId) {
 // New: Wallets management menu
 export async function buildWalletsMenu(chatId) {
   const wallets = await listUserWallets(chatId);
+  const state = getUserState(chatId);
+  const multi = !!state.multiWalletMode;
+  const selected = new Set(state.selectedWalletIds || []);
 
   const keyboard = [
     [
@@ -254,15 +258,25 @@ export async function buildWalletsMenu(chatId) {
   for (const wallet of wallets.slice(0, 8)) {
     // Limit to 8 wallets for UI
     const activeIndicator = wallet.active ? "✅ " : "";
+    const selectIndicator = multi && selected.has(wallet.id) ? "☑️ " : "";
     const shortAddress =
       wallet.publicKey.slice(0, 6) + "..." + wallet.publicKey.slice(-4);
     keyboard.push([
       {
-        text: `${activeIndicator}${wallet.name || shortAddress}`,
+        text: `${selectIndicator}${activeIndicator}${wallet.name || shortAddress}`,
         callback_data: `WALLET_${wallet.id}`,
       },
     ]);
   }
+
+  // Controls for multi-wallet selection
+  keyboard.push([
+    {
+      text: multi ? "🟢 Multi-Wallet Mode: ON" : "⚪ Multi-Wallet Mode: OFF",
+      callback_data: "MULTI_WALLET_TOGGLE",
+    },
+    { text: "🧹 Clear Selection", callback_data: "WALLET_CLEAR_SELECTION" },
+  ]);
 
   keyboard.push([{ text: "🔙 Back to Main", callback_data: "MAIN_MENU" }]);
 

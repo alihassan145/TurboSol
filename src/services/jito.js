@@ -146,6 +146,7 @@ export async function simulateBundleAndSend({
   chatId,
   useJitoBundle = false,
   priorityFeeMicroLamports,
+  simulatePreSend = true,
 }) {
   // Safely derive a base58 signature string if available (telemetry only)
   let sig = null;
@@ -158,31 +159,33 @@ export async function simulateBundleAndSend({
   const t0 = Date.now();
   const base64 = serializeToBase64(signedTx);
 
-  // 1) Simulate pre-send (don't block on failure; log telemetry)
-  try {
-    const sim = await simulateTransactionRaced(signedTx, {
-      commitment: "confirmed",
-      simulateOptions: { sigVerify: true },
-    });
+  // 1) Optional pre-send simulation (skip for fast snipes)
+  if (simulatePreSend) {
     try {
-      addTradeLog(chatId, {
-        kind: "telemetry",
-        stage: "pre_send_simulation",
-        ok: true,
-        units: sim?.value?.unitsConsumed ?? null,
-        err: null,
+      const sim = await simulateTransactionRaced(signedTx, {
+        commitment: "confirmed",
+        simulateOptions: { sigVerify: true },
       });
-    } catch {}
-  } catch (e) {
-    try {
-      addTradeLog(chatId, {
-        kind: "telemetry",
-        stage: "pre_send_simulation",
-        ok: false,
-        units: null,
-        err: String(e?.message || e),
-      });
-    } catch {}
+      try {
+        addTradeLog(chatId, {
+          kind: "telemetry",
+          stage: "pre_send_simulation",
+          ok: true,
+          units: sim?.value?.unitsConsumed ?? null,
+          err: null,
+        });
+      } catch {}
+    } catch (e) {
+      try {
+        addTradeLog(chatId, {
+          kind: "telemetry",
+          stage: "pre_send_simulation",
+          ok: false,
+          units: null,
+          err: String(e?.message || e),
+        });
+      } catch {}
+    }
   }
 
   // 2) Primary path: Jito bundle

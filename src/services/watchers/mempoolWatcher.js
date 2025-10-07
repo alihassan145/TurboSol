@@ -1,6 +1,6 @@
 import { getUserConnectionInstance } from "../wallet.js";
 import { getUserState, addTradeLog } from "../userState.js";
-import { hasUserWallet } from "../userWallets.js";
+import { hasUserWallet, getUserWalletKeypairById } from "../userWallets.js";
 import { startLiquidityWatch } from "./liquidityWatcher.js";
 import { PublicKey } from "@solana/web3.js";
 
@@ -105,23 +105,62 @@ async function triggerAutoSnipe(
     });
   } catch {}
 
-  startLiquidityWatch(chatId, {
-    mint,
-    amountSol: defaultSnipe,
-    priorityFeeLamports,
-    useJitoBundle,
-    pollInterval,
-    slippageBps,
-    retryCount,
-    source: `watch:${source}`,
-    signalType: "lp_event",
-    lpSignature,
-    onEvent: (m) => {
-      try {
-        onSnipeEvent?.(mint, m);
-      } catch {}
-    },
-  });
+  {
+    const st = getUserState(chatId) || {};
+    const selected = Array.isArray(st.selectedWalletIds)
+      ? st.selectedWalletIds
+      : [];
+    const multi = !!st.multiWalletMode;
+    if (multi && selected.length > 0) {
+      const wallets = (
+        await Promise.all(
+          selected.map((id) =>
+            getUserWalletKeypairById(chatId, id).catch(() => null)
+          )
+        )
+      ).filter(Boolean);
+      const count = wallets.length || 0;
+      const perWallet = count > 0 ? defaultSnipe / count : defaultSnipe;
+      for (const w of wallets) {
+        startLiquidityWatch(chatId, {
+          mint,
+          amountSol: perWallet,
+          priorityFeeLamports,
+          useJitoBundle,
+          pollInterval,
+          slippageBps,
+          retryCount,
+          source: `watch:${source}`,
+          signalType: "lp_event",
+          lpSignature,
+          walletOverride: w.keypair,
+          onEvent: (m) => {
+            try {
+              onSnipeEvent?.(mint, m);
+            } catch {}
+          },
+        });
+      }
+    } else {
+      startLiquidityWatch(chatId, {
+        mint,
+        amountSol: defaultSnipe,
+        priorityFeeLamports,
+        useJitoBundle,
+        pollInterval,
+        slippageBps,
+        retryCount,
+        source: `watch:${source}`,
+        signalType: "lp_event",
+        lpSignature,
+        onEvent: (m) => {
+          try {
+            onSnipeEvent?.(mint, m);
+          } catch {}
+        },
+      });
+    }
+  }
 }
 
 export function stopMempoolWatch(chatId) {

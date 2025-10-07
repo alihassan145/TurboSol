@@ -15,11 +15,28 @@ export async function connectWalletsDb() {
   const dbName = process.env.MONGODB_DB || "turbosol";
   if (!uri) return; // allow app to run without DB
   if (mongoClient && walletsCol) return; // already connected
-  mongoClient = new MongoClient(uri, { ignoreUndefined: true });
-  await mongoClient.connect();
-  const db = mongoClient.db(dbName);
-  walletsCol = db.collection("wallets");
-  await walletsCol.createIndex({ chatId: 1 });
+  try {
+    mongoClient = new MongoClient(uri, {
+      ignoreUndefined: true,
+      retryWrites: true,
+      minPoolSize: 1,
+      maxPoolSize: Number(process.env.MONGO_MAX_POOL || 10),
+      serverSelectionTimeoutMS: Number(process.env.MONGO_SELECT_TIMEOUT_MS || 5000),
+      connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS || 10000),
+      socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS || 20000),
+    });
+    await mongoClient.connect();
+    const db = mongoClient.db(dbName);
+    walletsCol = db.collection("wallets");
+    try { await walletsCol.createIndex({ chatId: 1 }); } catch {}
+  } catch (e) {
+    // Swallow DB init errors; fall back to in-memory wallet storage
+    mongoClient = null;
+    walletsCol = null;
+    try {
+      console.warn(`Mongo wallets DB unavailable: ${e?.message || e}`);
+    } catch {}
+  }
 }
 
 function getKey() {

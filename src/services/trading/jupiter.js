@@ -365,6 +365,7 @@ export async function performSwap({
   slippageBps: slippageBpsOverride,
   walletOverride,
   tradeKey,
+  fastSend = false,
 }) {
   if (!Number.isFinite(Number(amountSol)) || Number(amountSol) <= 0)
     throw new Error("invalid_amount");
@@ -470,6 +471,7 @@ export async function performSwap({
       chatId,
       useJitoBundle: effectiveUseJitoBundle,
       priorityFeeMicroLamports: null,
+      simulatePreSend: !fastSend,
     });
   } catch (e) {
     try {
@@ -610,10 +612,11 @@ export async function quickSell({
   priorityFeeLamports,
   useJitoBundle,
   slippageBps: slippageBpsOverride,
+  walletOverride,
   tradeKey,
 }) {
   const connection = getRpcConnection();
-  const wallet = await getUserWalletInstance(chatId);
+  const wallet = walletOverride || (await getUserWalletInstance(chatId));
   const state = chatId != null ? getUserState(chatId) : {};
 
   // Fetch token balance (sum across accounts of this mint)
@@ -718,6 +721,7 @@ export async function quickSell({
       chatId,
       useJitoBundle: effectiveUseJitoBundle,
       priorityFeeMicroLamports: null,
+      simulatePreSend: true,
     });
   } catch (e) {
     try {
